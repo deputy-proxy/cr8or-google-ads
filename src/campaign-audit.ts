@@ -98,10 +98,10 @@ export async function auditCampaign(
         ad_group_criterion.keyword.text,
         ad_group_criterion.keyword.match_type,
         ad_group_criterion.status,
-        ad_group_criterion.quality_info.quality_score,
-        ad_group_criterion.quality_info.creative_quality_score,
-        ad_group_criterion.quality_info.post_click_quality_score,
-        ad_group_criterion.quality_info.search_predicted_ctr
+        metrics.historical_quality_score,
+        metrics.historical_creative_quality_score,
+        metrics.historical_landing_page_quality_score,
+        metrics.historical_search_predicted_ctr
       FROM keyword_view
       WHERE ${campaignWhere}
         AND ad_group_criterion.status != 'REMOVED'
