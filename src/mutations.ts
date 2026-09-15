@@ -70,7 +70,7 @@ async function loadTarget(target: MutationTarget): Promise<Snapshot> {
 function snapshotStatus(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.status : type === 'ad_group' ? snapshot.ad_group?.status : snapshot.ad_group_criterion?.status; }
 function snapshotResource(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.resource_name : type === 'ad_group' ? snapshot.ad_group?.resource_name : snapshot.ad_group_criterion?.resource_name; }
 export async function validateMutation(target: MutationTarget) {
-  if (target.type === 'campaign') validateCampaignMutationChange(target.change); else validateStatus(target.change.status);
+  if ('status' in target.change) validateStatus(target.change.status); else validateCampaignMutationChange(target.change);
   const current = await loadTarget(target);
   const status = snapshotStatus(current, target.type);
   const resourceName = snapshotResource(current, target.type);
