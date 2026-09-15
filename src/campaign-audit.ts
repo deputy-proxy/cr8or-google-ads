@@ -178,9 +178,7 @@ export async function auditCampaign(
         campaign_criterion.ad_schedule.start_hour,
         campaign_criterion.ad_schedule.start_minute,
         campaign_criterion.ad_schedule.end_hour,
-        campaign_criterion.ad_schedule.end_minute,
-        campaign_criterion.ad_schedule.start_date,
-        campaign_criterion.ad_schedule.end_date
+        campaign_criterion.ad_schedule.end_minute
       FROM campaign_criterion
       WHERE ${campaignWhere}
         AND campaign_criterion.type = AD_SCHEDULE
