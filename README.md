@@ -2,11 +2,11 @@
 
 Google Ads MCP server for campaign management and reporting.
 
-## Phase 1
+## Tools
 
-Phase 1 is read-only. It provides an agent-oriented interface for account discovery and performance reporting without exposing mutation operations.
+The server exposes read-only reporting plus controlled mutation workflows. Mutations use validate → preview → explicit confirmation → apply and re-check current state before changing Google Ads.
 
-### Tools
+### Read/reporting tools
 
 - `list_accessible_customers`
 - `get_account`
@@ -16,11 +16,44 @@ Phase 1 is read-only. It provides an agent-oriented interface for account discov
 - `keyword_performance`
 - `search_terms`
 
-Mutations are intentionally not implemented yet. The next phase will add controlled campaign, budget, ad group, ad and keyword mutations behind validation and confirmation-oriented workflows.
+### Controlled mutation tools
 
-## Configuration
+- Campaign status and daily budget
+- Ad group status
+- Keyword status
 
-Set these environment variables:
+Raw Google Ads mutation primitives are not exposed to the MCP client.
+
+## Authentication
+
+The MCP endpoint supports two authentication paths:
+
+1. `MCP_AUTH_TOKEN` for direct trusted service-to-service access.
+2. MCP OAuth 2.1 for ChatGPT and other compatible MCP hosts.
+
+OAuth is implemented as a small broker: Google authenticates the human user, while this server issues its own short-lived MCP access token bound to the `/mcp` resource. Google OAuth credentials are separate from the Google Ads API credentials.
+
+### MCP OAuth environment
+
+```text
+GOOGLE_OAUTH_CLIENT_ID=
+GOOGLE_OAUTH_CLIENT_SECRET=
+OAUTH_SIGNING_SECRET=
+OAUTH_ALLOWED_EMAILS=
+OAUTH_ISSUER=https://cr8or-google-ads-production.up.railway.app
+```
+
+`OAUTH_ALLOWED_EMAILS` is a comma-separated allowlist of Google email addresses permitted to authorize the MCP server.
+
+The Google OAuth web application must allow this redirect URI:
+
+```text
+https://cr8or-google-ads-production.up.railway.app/oauth/callback
+```
+
+ChatGPT's OAuth callback is not registered in Google. ChatGPT sends its own callback and client metadata to this MCP authorization server during the MCP OAuth flow.
+
+### Google Ads API environment
 
 ```text
 GOOGLE_ADS_CLIENT_ID=
@@ -29,13 +62,9 @@ GOOGLE_ADS_DEVELOPER_TOKEN=
 GOOGLE_ADS_REFRESH_TOKEN=
 GOOGLE_ADS_CUSTOMER_ID=
 GOOGLE_ADS_LOGIN_CUSTOMER_ID=
-MCP_AUTH_TOKEN=
-PORT=3000
 ```
 
 `GOOGLE_ADS_LOGIN_CUSTOMER_ID` is optional and is used when the target customer is accessed through a manager account.
-
-`MCP_AUTH_TOKEN` protects the remote MCP endpoint. Do not expose the Railway service without authentication.
 
 ## Local development
 
@@ -48,9 +77,14 @@ HTTP endpoints:
 
 - `GET /health`
 - `POST /mcp`
+- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-authorization-server`
+- `GET /oauth/authorize`
+- `POST /oauth/token`
+- `GET /oauth/callback`
 
-The MCP endpoint expects `Authorization: Bearer <MCP_AUTH_TOKEN>`.
+The MCP endpoint accepts either `Authorization: Bearer <MCP_AUTH_TOKEN>` or an OAuth access token issued by this server.
 
 ## Railway
 
-The service listens on `0.0.0.0` and uses Railway's `PORT` environment variable. Deploy the repository as a Node/Docker service and configure the environment variables above.
+The service listens on `0.0.0.0` and uses Railway's `PORT` environment variable. Configure the Google Ads credentials, `MCP_AUTH_TOKEN`, and MCP OAuth variables before enabling the public MCP endpoint.
