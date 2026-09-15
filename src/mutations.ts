@@ -3,39 +3,39 @@ import { getCustomer } from './google-ads.js';
 import { enums } from 'google-ads-api';
 
 export type CampaignChange =
-  | { status: 'ENABLED' | 'PAUSED'; dailyBudgetMicros?: never }
-  | { dailyBudgetMicros: number; status?: never };
+  | { status: 'ENABLED' | 'PAUSED'; dailyBudgetMicros?: never };
 
-interface CampaignSnapshot {
-  campaign: {
-    resource_name: string;
-    id?: string | number;
-    name?: string;
-    status?: string;
-  };
-  campaign_budget: {
-    resource_name: string;
-    amount_micros?: string | number;
-  };
+export type AdGroupChange =
+  | { status: 'ENABLED' | 'PAUSED' };
+
+export type KeywordChange =
+  | { status: 'ENABLED' | 'PAUSED' };
+
+export type MutationTarget =
+  | { type: 'campaign'; id: string; change: CampaignChange }
+  | { type: 'ad_group'; id: string; change: AdGroupChange }
+  | { type: 'keyword'; id: string; change: KeywordChange };
+
+interface MutationSnapshot {
+  type: MutationTarget['type'];
+  resourceName: string;
+  status?: string;
+  campaignId?: string | number;
+  adGroupId?: string | number;
+  keywordText?: string;
 }
 
 interface MutationPlan {
-  version: 1;
+  version: 2;
   customerId: string;
-  campaignId: string;
-  campaignResourceName: string;
-  campaignBudgetResourceName: string;
-  action: CampaignChange;
-  expected: {
-    campaignStatus?: string;
-    budgetMicros?: string;
-  };
+  target: MutationTarget;
+  resourceName: string;
+  expectedStatus: string;
+  label: string;
   expiresAt: number;
 }
 
 const PLAN_TTL_MS = 10 * 60 * 1000;
-const MIN_DAILY_BUDGET_MICROS = 1_000_000;
-const MAX_DAILY_BUDGET_MICROS = 100_000_000_000;
 
 function mutationSecret(): string {
   const secret = process.env.MCP_AUTH_TOKEN;
@@ -70,95 +70,96 @@ function decodePlan(token: string): MutationPlan {
     throw new Error('Invalid confirmation token.');
   }
 
-  if (plan.version !== 1 || !plan.expiresAt || Date.now() > plan.expiresAt) {
+  if (plan.version !== 2 || !plan.expiresAt || Date.now() > plan.expiresAt) {
     throw new Error('Confirmation token has expired. Generate a new preview.');
   }
 
   return plan;
 }
 
-function validateChange(change: CampaignChange): void {
-  const hasStatus = 'status' in change && change.status !== undefined;
-  const hasBudget = 'dailyBudgetMicros' in change && change.dailyBudgetMicros !== undefined;
-
-  if (hasStatus === hasBudget) {
-    throw new Error('Provide exactly one change: status or dailyBudgetMicros.');
-  }
-
-  if (hasBudget) {
-    const amount = change.dailyBudgetMicros;
-    if (!Number.isSafeInteger(amount)) throw new Error('dailyBudgetMicros must be a safe integer.');
-    if (amount < MIN_DAILY_BUDGET_MICROS || amount > MAX_DAILY_BUDGET_MICROS) {
-      throw new Error(`dailyBudgetMicros must be between ${MIN_DAILY_BUDGET_MICROS} and ${MAX_DAILY_BUDGET_MICROS}.`);
-    }
+function validateStatusChange(status: 'ENABLED' | 'PAUSED'): void {
+  if (status !== 'ENABLED' && status !== 'PAUSED') {
+    throw new Error('Status must be ENABLED or PAUSED.');
   }
 }
 
-async function loadCampaign(campaignId: string): Promise<CampaignSnapshot> {
+async function loadTarget(target: MutationTarget): Promise<MutationSnapshot> {
   const customer = getCustomer();
-  const rows = await customer.query(`
-    SELECT
-      campaign.resource_name,
-      campaign.id,
-      campaign.name,
-      campaign.status,
-      campaign_budget.resource_name,
-      campaign_budget.amount_micros
-    FROM campaign
-    WHERE campaign.id = ${campaignId}
-    LIMIT 1
-  `) as CampaignSnapshot[];
+  let rows: MutationSnapshot[];
 
-  if (!rows[0]?.campaign?.resource_name || !rows[0]?.campaign_budget?.resource_name) {
-    throw new Error(`Campaign ${campaignId} was not found or has no accessible budget.`);
+  if (target.type === 'campaign') {
+    rows = await customer.query(`
+      SELECT campaign.resource_name, campaign.id, campaign.name, campaign.status
+      FROM campaign
+      WHERE campaign.id = ${target.id}
+      LIMIT 1
+    `) as MutationSnapshot[];
+  } else if (target.type === 'ad_group') {
+    rows = await customer.query(`
+      SELECT ad_group.resource_name, ad_group.id, ad_group.name, ad_group.status, campaign.id
+      FROM ad_group
+      WHERE ad_group.id = ${target.id}
+      LIMIT 1
+    `) as MutationSnapshot[];
+  } else {
+    rows = await customer.query(`
+      SELECT
+        ad_group_criterion.resource_name,
+        ad_group_criterion.criterion_id,
+        ad_group_criterion.status,
+        ad_group_criterion.keyword.text,
+        ad_group.id,
+        campaign.id
+      FROM keyword_view
+      WHERE ad_group_criterion.criterion_id = ${target.id}
+      LIMIT 1
+    `) as MutationSnapshot[];
   }
 
-  return rows[0];
+  const row = rows[0];
+  if (!row?.resourceName || !row.status) {
+    throw new Error(`${target.type} ${target.id} was not found or is not accessible.`);
+  }
+
+  return row;
 }
 
-export async function validateCampaignChange(campaignId: string, change: CampaignChange) {
-  validateChange(change);
-  const current = await loadCampaign(campaignId);
+export async function validateMutation(target: MutationTarget) {
+  validateStatusChange(target.change.status);
+  const current = await loadTarget(target);
 
-  if ('status' in change && change.status === current.campaign.status) {
-    throw new Error(`Campaign is already ${change.status}.`);
-  }
-
-  const currentBudget = Number(current.campaign_budget.amount_micros ?? 0);
-  if ('dailyBudgetMicros' in change && change.dailyBudgetMicros === currentBudget) {
-    throw new Error('Campaign budget is already set to that amount.');
+  if (current.status === target.change.status) {
+    throw new Error(`${target.type} is already ${target.change.status}.`);
   }
 
   return {
-    campaignId,
-    campaignResourceName: current.campaign.resource_name,
-    campaignBudgetResourceName: current.campaign_budget.resource_name,
+    type: target.type,
+    id: target.id,
+    resourceName: current.resourceName,
     current: {
-      name: current.campaign.name,
-      status: current.campaign.status,
-      dailyBudgetMicros: currentBudget,
+      status: current.status,
+      campaignId: current.campaignId,
+      adGroupId: current.adGroupId,
+      keywordText: current.keywordText,
     },
-    requested: change,
+    requested: target.change,
     valid: true as const,
   };
 }
 
-export async function previewCampaignChange(campaignId: string, change: CampaignChange) {
-  const validation = await validateCampaignChange(campaignId, change);
-  const current = await loadCampaign(campaignId);
+export async function previewMutation(target: MutationTarget) {
+  const validation = await validateMutation(target);
+  const current = await loadTarget(target);
   const expiresAt = Date.now() + PLAN_TTL_MS;
+  const label = `${target.type}:${target.id}`;
 
   const plan: MutationPlan = {
-    version: 1,
+    version: 2,
     customerId: getCustomer().credentials.customer_id,
-    campaignId,
-    campaignResourceName: validation.campaignResourceName,
-    campaignBudgetResourceName: validation.campaignBudgetResourceName,
-    action: change,
-    expected: {
-      campaignStatus: current.campaign.status,
-      budgetMicros: String(current.campaign_budget.amount_micros ?? 0),
-    },
+    target,
+    resourceName: validation.resourceName,
+    expectedStatus: String(current.status),
+    label,
     expiresAt,
   };
 
@@ -169,48 +170,57 @@ export async function previewCampaignChange(campaignId: string, change: Campaign
   };
 }
 
-export async function applyCampaignChange(confirmationToken: string) {
+export async function applyMutation(confirmationToken: string) {
   const plan = decodePlan(confirmationToken);
-  const current = await loadCampaign(plan.campaignId);
+  const current = await loadTarget(plan.target);
 
-  if (current.campaign.resource_name !== plan.campaignResourceName ||
-      current.campaign_budget.resource_name !== plan.campaignBudgetResourceName) {
-    throw new Error('Campaign resources changed since the preview. Generate a new preview.');
+  if (current.resourceName !== plan.resourceName || String(current.status) !== plan.expectedStatus) {
+    throw new Error('Resource state changed since the preview. Generate a new preview.');
   }
 
-  if (String(current.campaign.status) !== String(plan.expected.campaignStatus) ||
-      String(current.campaign_budget.amount_micros ?? 0) !== String(plan.expected.budgetMicros ?? 0)) {
-    throw new Error('Campaign state changed since the preview. Generate a new preview.');
-  }
-
-  validateChange(plan.action);
+  validateStatusChange(plan.target.change.status);
   const customer = getCustomer();
+  const status = plan.target.change.status === 'ENABLED'
+    ? enums.AdGroupStatus.ENABLED
+    : enums.AdGroupStatus.PAUSED;
 
-  if ('status' in plan.action) {
-    const status = plan.action.status === 'ENABLED'
+  if (plan.target.type === 'campaign') {
+    const campaignStatus = plan.target.change.status === 'ENABLED'
       ? enums.CampaignStatus.ENABLED
       : enums.CampaignStatus.PAUSED;
     const result = await customer.campaigns.update([{
-      resource_name: plan.campaignResourceName,
-      status,
+      resource_name: plan.resourceName,
+      status: campaignStatus,
     }]);
-    return {
-      applied: true,
-      action: plan.action,
-      resourceName: plan.campaignResourceName,
-      result,
-    };
+    return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
   }
 
-  const result = await customer.campaignBudgets.update([{
-    resource_name: plan.campaignBudgetResourceName,
-    amount_micros: plan.action.dailyBudgetMicros,
-  }]);
+  if (plan.target.type === 'ad_group') {
+    const result = await customer.adGroups.update([{
+      resource_name: plan.resourceName,
+      status,
+    }]);
+    return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
+  }
 
-  return {
-    applied: true,
-    action: plan.action,
-    resourceName: plan.campaignBudgetResourceName,
-    result,
-  };
+  const keywordStatus = plan.target.change.status === 'ENABLED'
+    ? enums.AdGroupCriterionStatus.ENABLED
+    : enums.AdGroupCriterionStatus.PAUSED;
+  const result = await customer.adGroupCriteria.update([{
+    resource_name: plan.resourceName,
+    status: keywordStatus,
+  }]);
+  return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
+}
+
+export async function validateCampaignChange(campaignId: string, change: CampaignChange) {
+  return validateMutation({ type: 'campaign', id: campaignId, change });
+}
+
+export async function previewCampaignChange(campaignId: string, change: CampaignChange) {
+  return previewMutation({ type: 'campaign', id: campaignId, change });
+}
+
+export async function applyCampaignChange(confirmationToken: string) {
+  return applyMutation(confirmationToken);
 }
