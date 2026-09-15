@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { registerReadTools } from './tools.js';
+import { registerMutationTools } from './mutation-tools.js';
 
 const port = Number(process.env.PORT ?? 3000);
 const authToken = process.env.MCP_AUTH_TOKEN;
@@ -17,6 +18,7 @@ function createMcpServer(): McpServer {
   });
 
   registerReadTools(server);
+  registerMutationTools(server);
   return server;
 }
 
