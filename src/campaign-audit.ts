@@ -1,6 +1,24 @@
 import { errors } from 'google-ads-api';
 import { getCustomer } from './google-ads.js';
 
+const LIMITS = {
+  adGroups: 200,
+  keywords: 200,
+  negativeKeywords: 200,
+  ads: 200,
+  locations: 100,
+  languages: 100,
+  schedules: 100,
+  campaignGoals: 100,
+  conversionActions: 100,
+  searchTerms: 100,
+};
+
+type QueryResult = {
+  items: unknown[];
+  truncated: boolean;
+};
+
 function json(data: unknown): string {
   return JSON.stringify(data, (_, value) => typeof value === 'bigint' ? value.toString() : value, 2);
 }
@@ -9,10 +27,10 @@ function escapeGaqlString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
-function errorPayload(error: unknown): string {
+function errorDetails(error: unknown): Record<string, unknown> {
   if (error instanceof errors.GoogleAdsFailure) {
-    return json({
-      error: 'Google Ads API request failed',
+    return {
+      message: 'Google Ads API request failed',
       requestId: error.request_id,
       details: error.errors.map((item) => ({
         message: item.message,
@@ -20,9 +38,38 @@ function errorPayload(error: unknown): string {
         errorCode: item.error_code,
         location: item.location,
       })),
-    });
+    };
   }
-  return json({ error: error instanceof Error ? error.message : String(error) });
+
+  return {
+    message: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function errorPayload(error: unknown): string {
+  return json({ error: errorDetails(error) });
+}
+
+async function querySection(
+  name: string,
+  query: string,
+  limit?: number,
+): Promise<{ name: string; result?: QueryResult; error?: Record<string, unknown> }> {
+  try {
+    const rows = await getCustomer().query(query);
+    const items = limit === undefined ? rows : rows.slice(0, limit);
+
+    return {
+      name,
+      result: {
+        items,
+        truncated: limit !== undefined && rows.length > limit,
+      },
+    };
+  } catch (error) {
+    console.error(`[campaign_audit] ${name} failed`, errorDetails(error));
+    return { name, error: errorDetails(error) };
+  }
 }
 
 export async function auditCampaign(
@@ -38,43 +85,50 @@ export async function auditCampaign(
     throw new Error('fromDate and toDate must be provided together.');
   }
 
-  const customer = getCustomer();
   const campaignWhere = campaignId
     ? `campaign.id = ${campaignId}`
     : `campaign.name = '${escapeGaqlString(campaignName as string)}'`;
   const dateFilter = fromDate
     ? `segments.date BETWEEN '${fromDate}' AND '${toDate}'`
     : 'segments.date DURING LAST_30_DAYS';
+  const customer = getCustomer();
 
-  const [campaignRows, adGroups, keywords, negativeKeywords, ads, locations, languages, schedules, campaignGoals, conversionActions, performance, searchTerms] = await Promise.all([
-    customer.query(`
-      SELECT
-        campaign.id,
-        campaign.name,
-        campaign.status,
-        campaign.advertising_channel_type,
-        campaign.advertising_channel_sub_type,
-        campaign.bidding_strategy_type,
-        campaign.bidding_strategy,
-        campaign.target_cpa.target_cpa_micros,
-        campaign.target_roas.target_roas,
-        campaign.maximize_conversions.target_cpa_micros,
-        campaign.maximize_conversion_value.target_roas,
-        campaign.network_settings.target_google_search,
-        campaign.network_settings.target_search_network,
-        campaign.network_settings.target_content_network,
-        campaign.network_settings.target_partner_search_network,
-        campaign.start_date_time,
-        campaign.end_date_time,
-        campaign_budget.id,
-        campaign_budget.name,
-        campaign_budget.amount_micros,
-        campaign_budget.status,
-        campaign_budget.delivery_method
-      FROM campaign
-      WHERE ${campaignWhere}
-    `),
-    customer.query(`
+  const campaignRows = await customer.query(`
+    SELECT
+      campaign.id,
+      campaign.name,
+      campaign.status,
+      campaign.advertising_channel_type,
+      campaign.advertising_channel_sub_type,
+      campaign.bidding_strategy_type,
+      campaign.bidding_strategy,
+      campaign.target_cpa.target_cpa_micros,
+      campaign.target_roas.target_roas,
+      campaign.maximize_conversions.target_cpa_micros,
+      campaign.maximize_conversion_value.target_roas,
+      campaign.network_settings.target_google_search,
+      campaign.network_settings.target_search_network,
+      campaign.network_settings.target_content_network,
+      campaign.network_settings.target_partner_search_network,
+      campaign.start_date_time,
+      campaign.end_date_time,
+      campaign_budget.id,
+      campaign_budget.name,
+      campaign_budget.amount_micros,
+      campaign_budget.status,
+      campaign_budget.delivery_method
+    FROM campaign
+    WHERE ${campaignWhere}
+  `);
+
+  const campaignRow = campaignRows[0];
+  const campaign = campaignRow?.campaign;
+  if (!campaign) {
+    throw new Error(`Campaign not found: ${campaignId ?? campaignName}`);
+  }
+
+  const sections = [
+    await querySection('ad_groups', `
       SELECT
         campaign.id,
         ad_group.id,
@@ -88,8 +142,9 @@ export async function auditCampaign(
       WHERE ${campaignWhere}
         AND ad_group.status != 'REMOVED'
       ORDER BY ad_group.id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.adGroups + 1}
+    `, LIMITS.adGroups),
+    await querySection('keywords', `
       SELECT
         campaign.id,
         ad_group.id,
@@ -106,8 +161,9 @@ export async function auditCampaign(
       WHERE ${campaignWhere}
         AND ad_group_criterion.status != 'REMOVED'
       ORDER BY ad_group.id, ad_group_criterion.criterion_id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.keywords + 1}
+    `, LIMITS.keywords),
+    await querySection('negative_keywords', `
       SELECT
         campaign.id,
         campaign_criterion.criterion_id,
@@ -121,8 +177,9 @@ export async function auditCampaign(
         AND campaign_criterion.type = KEYWORD
         AND campaign_criterion.status != 'REMOVED'
       ORDER BY campaign_criterion.criterion_id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.negativeKeywords + 1}
+    `, LIMITS.negativeKeywords),
+    await querySection('ads', `
       SELECT
         campaign.id,
         ad_group.id,
@@ -141,8 +198,9 @@ export async function auditCampaign(
       WHERE ${campaignWhere}
         AND ad_group_ad.status != 'REMOVED'
       ORDER BY ad_group.id, ad_group_ad.ad.id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.ads + 1}
+    `, LIMITS.ads),
+    await querySection('locations', `
       SELECT
         campaign.id,
         campaign_criterion.criterion_id,
@@ -154,8 +212,9 @@ export async function auditCampaign(
         AND campaign_criterion.type = LOCATION
         AND campaign_criterion.status != 'REMOVED'
       ORDER BY campaign_criterion.criterion_id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.locations + 1}
+    `, LIMITS.locations),
+    await querySection('languages', `
       SELECT
         campaign.id,
         campaign_criterion.criterion_id,
@@ -167,8 +226,9 @@ export async function auditCampaign(
         AND campaign_criterion.type = LANGUAGE
         AND campaign_criterion.status != 'REMOVED'
       ORDER BY campaign_criterion.criterion_id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.languages + 1}
+    `, LIMITS.languages),
+    await querySection('schedules', `
       SELECT
         campaign.id,
         campaign_criterion.criterion_id,
@@ -183,8 +243,9 @@ export async function auditCampaign(
         AND campaign_criterion.type = AD_SCHEDULE
         AND campaign_criterion.status != 'REMOVED'
       ORDER BY campaign_criterion.criterion_id
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.schedules + 1}
+    `, LIMITS.schedules),
+    await querySection('conversion_goals', `
       SELECT
         campaign_conversion_goal.campaign,
         campaign_conversion_goal.category,
@@ -192,8 +253,9 @@ export async function auditCampaign(
         campaign_conversion_goal.biddable
       FROM campaign_conversion_goal
       WHERE ${campaignWhere}
-    `),
-    customer.query(`
+      LIMIT ${LIMITS.campaignGoals + 1}
+    `, LIMITS.campaignGoals),
+    await querySection('conversion_actions', `
       SELECT
         conversion_action.resource_name,
         conversion_action.id,
@@ -205,8 +267,10 @@ export async function auditCampaign(
         conversion_action.include_in_conversions_metric
       FROM conversion_action
       WHERE conversion_action.status != 'REMOVED'
-    `),
-    customer.query(`
+      ORDER BY conversion_action.id
+      LIMIT ${LIMITS.conversionActions + 1}
+    `, LIMITS.conversionActions),
+    await querySection('performance', `
       SELECT
         campaign.id,
         campaign.name,
@@ -223,7 +287,7 @@ export async function auditCampaign(
       WHERE ${campaignWhere}
         AND ${dateFilter}
     `),
-    customer.query(`
+    await querySection('search_terms', `
       SELECT
         campaign.id,
         ad_group.id,
@@ -244,15 +308,13 @@ export async function auditCampaign(
       WHERE ${campaignWhere}
         AND ${dateFilter}
       ORDER BY metrics.cost_micros DESC
-      LIMIT 1000
-    `),
-  ]);
+      LIMIT ${LIMITS.searchTerms + 1}
+    `, LIMITS.searchTerms),
+  ];
 
-  const campaignRow = campaignRows[0];
-  const campaign = campaignRow?.campaign;
-  if (!campaign) {
-    throw new Error(`Campaign not found: ${campaignId ?? campaignName}`);
-  }
+  const byName = new Map(sections.map((section) => [section.name, section]));
+  const sectionData = (name: string) => byName.get(name)?.result ?? { items: [], truncated: false };
+  const sectionError = (name: string) => byName.get(name)?.error;
 
   return json({
     audit_scope: {
@@ -264,20 +326,28 @@ export async function auditCampaign(
       ...campaign,
       budget: campaignRow.campaign_budget,
     },
-    ad_groups: adGroups,
-    keywords,
-    negative_keywords: negativeKeywords,
-    ads,
-    targeting: {
-      locations,
-      languages,
-      schedules,
+    sections: {
+      ad_groups: sectionData('ad_groups'),
+      keywords: sectionData('keywords'),
+      negative_keywords: sectionData('negative_keywords'),
+      ads: sectionData('ads'),
+      targeting: {
+        locations: sectionData('locations'),
+        languages: sectionData('languages'),
+        schedules: sectionData('schedules'),
+      },
+      conversion_goals: sectionData('conversion_goals'),
+      conversion_actions: sectionData('conversion_actions'),
+      performance: sectionData('performance'),
+      search_terms: sectionData('search_terms'),
     },
-    conversion_goals: campaignGoals,
-    conversion_actions: conversionActions,
-    performance,
-    search_terms: searchTerms,
+    section_errors: Object.fromEntries(
+      sections
+        .filter((section) => section.error)
+        .map((section) => [section.name, sectionError(section.name)]),
+    ),
     audit_notes: {
+      response_limits: 'Large collections are intentionally capped to keep the MCP response bounded. A truncated section means additional rows exist in Google Ads but are not included in this response.',
       landing_pages: 'Landing-page relevance and conversion-path quality require inspecting the returned final_urls outside the Google Ads configuration data.',
       budget_assessment: 'Budget adequacy is contextual and should be assessed against bidding strategy, conversion volume, CPA targets and recent performance rather than budget alone.',
     },
