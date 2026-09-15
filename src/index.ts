@@ -34,7 +34,11 @@ async function isAuthorized(req: IncomingMessage): Promise<boolean> {
 }
 
 function jsonResponse(res: ServerResponse, status: number, body: object): void {
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'cache-control': 'no-store',
+    'access-control-allow-origin': '*',
+  });
   res.end(JSON.stringify(body));
 }
 
@@ -50,32 +54,49 @@ const httpServer = createServer(async (req, res) => {
     jsonResponse(res, 200, { status: 'ok', service: 'cr8or-google-ads', version: '0.1.0' });
     return;
   }
-  if (url.pathname === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
+
+  if ((url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp' || url.pathname === '/mcp/.well-known/oauth-protected-resource') && req.method === 'GET') {
     jsonResponse(res, 200, protectedResourceMetadata());
     return;
   }
+
   if (url.pathname === '/.well-known/oauth-authorization-server' && req.method === 'GET') {
     jsonResponse(res, 200, oauthMetadata());
     return;
   }
+
   if (url.pathname === '/oauth/authorize' && req.method === 'GET') {
-    try { redirectResponse(res, (await handleOAuthAuthorize(url)).location); }
-    catch (error) { jsonResponse(res, 400, { error: error instanceof Error ? error.message : 'Invalid authorization request' }); }
+    try {
+      redirectResponse(res, (await handleOAuthAuthorize(url)).location);
+    } catch (error) {
+      jsonResponse(res, 400, { error: error instanceof Error ? error.message : 'Invalid authorization request' });
+    }
     return;
   }
+
   if (url.pathname === '/oauth/callback' && req.method === 'GET') {
-    try { redirectResponse(res, (await handleOAuthCallback(url)).location); }
-    catch (error) { jsonResponse(res, 400, { error: error instanceof Error ? error.message : 'OAuth callback failed' }); }
+    try {
+      redirectResponse(res, (await handleOAuthCallback(url)).location);
+    } catch (error) {
+      jsonResponse(res, 400, { error: error instanceof Error ? error.message : 'OAuth callback failed' });
+    }
     return;
   }
+
   if (url.pathname === '/oauth/token' && req.method === 'POST') {
     try {
       const body = await readBody(req);
-      const request = new Request(`${issuer}/oauth/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body });
+      const request = new Request(`${issuer}/oauth/token`, {
+        method: 'POST',
+        headers: { 'content-type': req.headers['content-type'] ?? 'application/x-www-form-urlencoded' },
+        body,
+      });
       const result = await handleOAuthToken(request);
       res.writeHead(result.status, Object.fromEntries(result.headers.entries()));
       res.end(await result.text());
-    } catch (error) { jsonResponse(res, 400, { error: error instanceof Error ? error.message : 'OAuth token request failed' }); }
+    } catch (error) {
+      jsonResponse(res, 400, { error: error instanceof Error ? error.message : 'OAuth token request failed' });
+    }
     return;
   }
 
@@ -83,17 +104,20 @@ const httpServer = createServer(async (req, res) => {
     jsonResponse(res, 404, { error: 'Not found' });
     return;
   }
+
   if (!(await isAuthorized(req))) {
     res.writeHead(401, {
       'content-type': 'application/json',
-      'www-authenticate': `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource"`,
+      'www-authenticate': `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource", scope="mcp"`,
+      'access-control-allow-origin': '*',
     });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
   }
 
-  try { await nodeHandler(req, res); }
-  catch (error) {
+  try {
+    await nodeHandler(req, res);
+  } catch (error) {
     console.error('MCP request failed:', error);
     if (!res.headersSent) jsonResponse(res, 500, { error: 'Internal server error' });
   }
