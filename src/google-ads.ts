@@ -31,5 +31,5 @@ export async function listAccessibleCustomers(): Promise<string[]> {
   });
 
   const response = await client.listAccessibleCustomers(config.refreshToken);
-  return response.resourceNames ?? [];
+  return response.resource_names ?? [];
 }
