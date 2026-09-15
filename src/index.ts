@@ -3,6 +3,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { registerReadTools } from './tools.js';
 import { registerMutationTools } from './mutation-tools.js';
+import { registerAuditTools } from './audit-tools.js';
 import { handleOAuthAuthorize, handleOAuthCallback, handleOAuthToken, oauthMetadata, protectedResourceMetadata, verifyOAuthAccessToken } from './oauth.js';
 
 const port = Number(process.env.PORT ?? 3000);
@@ -15,6 +16,7 @@ function createMcpServer(): McpServer {
   const server = new McpServer({ name: 'cr8or-google-ads', version: '0.1.0' });
   registerReadTools(server);
   registerMutationTools(server);
+  registerAuditTools(server);
   return server;
 }
 
