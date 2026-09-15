@@ -100,7 +100,6 @@ export async function auditCampaign(
         ad_group_criterion.status,
         ad_group_criterion.quality_info.quality_score,
         ad_group_criterion.quality_info.creative_quality_score,
-        ad_group_criterion.quality_info.landing_page_experience,
         ad_group_criterion.quality_info.post_click_quality_score,
         ad_group_criterion.quality_info.search_predicted_ctr
       FROM keyword_view
