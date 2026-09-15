@@ -1,19 +1,15 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { enums, ResourceNames } from 'google-ads-api';
+import { enums } from 'google-ads-api';
 import { getCustomer, getCustomerFor } from './google-ads.js';
 
 const PLAN_TTL_MS = 10 * 60 * 1000;
-
 type MatchType = 'EXACT' | 'PHRASE' | 'BROAD';
-type CampaignStatus = 'ENABLED' | 'PAUSED';
-type AdGroupStatus = 'ENABLED' | 'PAUSED';
 type CriterionStatus = 'ENABLED' | 'PAUSED';
-
 type OptimizationOperation =
-  | { type: 'campaign_status'; status: CampaignStatus }
+  | { type: 'campaign_status'; status: 'ENABLED' | 'PAUSED' }
   | { type: 'campaign_budget'; dailyBudgetMicros: number }
   | { type: 'campaign_bidding'; strategy: 'MANUAL_CPC' | 'MAXIMIZE_CONVERSIONS' | 'MAXIMIZE_CONVERSION_VALUE' | 'TARGET_CPA' | 'TARGET_ROAS'; targetCpaMicros?: number; targetRoas?: number }
-  | { type: 'ad_group_status'; adGroupId: string; status: AdGroupStatus }
+  | { type: 'ad_group_status'; adGroupId: string; status: CriterionStatus }
   | { type: 'ad_group_bid'; adGroupId: string; cpcBidMicros?: number; targetCpaMicros?: number; targetRoas?: number }
   | { type: 'keyword_status'; keywordId: string; status: CriterionStatus }
   | { type: 'keyword_remove'; keywordId: string }
@@ -25,120 +21,45 @@ type OptimizationOperation =
   | { type: 'campaign_goal_reset_to_customer' }
   | { type: 'custom_conversion_goal'; name: string; conversionActionIds: string[] };
 
-export interface CampaignOptimization {
-  campaignId: string;
-  operations: OptimizationOperation[];
-}
+export interface CampaignOptimization { campaignId: string; operations: OptimizationOperation[]; }
+interface OptimizationPlan { version: 1; customerId: string; campaignId: string; operations: OptimizationOperation[]; expectedCampaignStatus: string; expectedBudgetMicros: string; expiresAt: number; }
 
-interface OptimizationPlan {
-  version: 1;
-  customerId: string;
-  campaignId: string;
-  operations: OptimizationOperation[];
-  expectedCampaignStatus: string;
-  expectedBudgetMicros: string;
-  expiresAt: number;
-}
-
-function mutationSecret(): string {
-  const secret = process.env.MCP_AUTH_TOKEN;
-  if (!secret) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN');
-  return secret;
-}
-
-function sign(value: string): string {
-  return createHmac('sha256', mutationSecret()).update(value).digest('base64url');
-}
-
-function encodePlan(plan: OptimizationPlan): string {
-  const payload = Buffer.from(JSON.stringify(plan)).toString('base64url');
-  return `${payload}.${sign(payload)}`;
-}
-
+function mutationSecret(): string { const secret = process.env.MCP_AUTH_TOKEN; if (!secret) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN'); return secret; }
+function sign(value: string): string { return createHmac('sha256', mutationSecret()).update(value).digest('base64url'); }
+function encodePlan(plan: OptimizationPlan): string { const payload = Buffer.from(JSON.stringify(plan)).toString('base64url'); return `${payload}.${sign(payload)}`; }
 function decodePlan(token: string): OptimizationPlan {
   const [payload, signature] = token.split('.');
   if (!payload || !signature) throw new Error('Invalid confirmation token.');
-  const expected = Buffer.from(sign(payload));
-  const actual = Buffer.from(signature);
+  const expected = Buffer.from(sign(payload)); const actual = Buffer.from(signature);
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('Invalid confirmation token.');
   let plan: OptimizationPlan;
-  try {
-    plan = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as OptimizationPlan;
-  } catch {
-    throw new Error('Invalid confirmation token.');
-  }
+  try { plan = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as OptimizationPlan; } catch { throw new Error('Invalid confirmation token.'); }
   if (plan.version !== 1 || Date.now() > plan.expiresAt) throw new Error('Confirmation token has expired. Generate a new preview.');
   return plan;
 }
-
-function assertId(value: string, name: string): void {
-  if (!/^\d+$/.test(value)) throw new Error(`${name} must be a numeric Google Ads ID.`);
-}
+function assertId(value: string, name: string): void { if (!/^\d+$/.test(value)) throw new Error(`${name} must be a numeric Google Ads ID.`); }
 
 function validateOperation(operation: OptimizationOperation): void {
   switch (operation.type) {
-    case 'campaign_budget':
-      if (!Number.isSafeInteger(operation.dailyBudgetMicros) || operation.dailyBudgetMicros < 1_000_000 || operation.dailyBudgetMicros > 100_000_000_000) throw new Error('dailyBudgetMicros must be a safe integer between 1000000 and 100000000000.');
-      break;
+    case 'campaign_budget': if (!Number.isSafeInteger(operation.dailyBudgetMicros) || operation.dailyBudgetMicros < 1_000_000 || operation.dailyBudgetMicros > 100_000_000_000) throw new Error('dailyBudgetMicros must be a safe integer between 1000000 and 100000000000.'); break;
     case 'campaign_bidding':
-      if (operation.strategy === 'TARGET_CPA' || operation.strategy === 'MAXIMIZE_CONVERSIONS') {
-        if (operation.targetCpaMicros !== undefined && (!Number.isSafeInteger(operation.targetCpaMicros) || operation.targetCpaMicros < 1_000_000)) throw new Error('targetCpaMicros must be a safe integer of at least 1000000.');
-      }
-      if (operation.strategy === 'TARGET_ROAS' || operation.strategy === 'MAXIMIZE_CONVERSION_VALUE') {
-        if (operation.targetRoas !== undefined && (operation.targetRoas < 0.01 || operation.targetRoas > 1000)) throw new Error('targetRoas must be between 0.01 and 1000.');
-      }
+      if ((operation.strategy === 'TARGET_CPA' || operation.strategy === 'MAXIMIZE_CONVERSIONS') && operation.targetCpaMicros !== undefined && (!Number.isSafeInteger(operation.targetCpaMicros) || operation.targetCpaMicros < 1_000_000)) throw new Error('targetCpaMicros must be a safe integer of at least 1000000.');
+      if ((operation.strategy === 'TARGET_ROAS' || operation.strategy === 'MAXIMIZE_CONVERSION_VALUE') && operation.targetRoas !== undefined && (operation.targetRoas < 0.01 || operation.targetRoas > 1000)) throw new Error('targetRoas must be between 0.01 and 1000.');
       break;
-    case 'ad_group_status':
-    case 'keyword_status':
-      assertId(operation.adGroupId ?? operation.keywordId, 'resource ID');
-      break;
-    case 'ad_group_bid':
-      assertId(operation.adGroupId, 'adGroupId');
-      if (operation.cpcBidMicros !== undefined && (!Number.isSafeInteger(operation.cpcBidMicros) || operation.cpcBidMicros < 0)) throw new Error('cpcBidMicros must be a non-negative safe integer.');
-      if (operation.targetCpaMicros !== undefined && (!Number.isSafeInteger(operation.targetCpaMicros) || operation.targetCpaMicros < 1_000_000)) throw new Error('targetCpaMicros must be a safe integer of at least 1000000.');
-      if (operation.targetRoas !== undefined && (operation.targetRoas < 0.01 || operation.targetRoas > 1000)) throw new Error('targetRoas must be between 0.01 and 1000.');
-      if (operation.cpcBidMicros === undefined && operation.targetCpaMicros === undefined && operation.targetRoas === undefined) throw new Error('ad_group_bid requires at least one bid field.');
-      break;
-    case 'keyword_remove':
-    case 'negative_keyword_remove':
-    case 'ad_remove':
-      assertId(operation.keywordId ?? operation.criterionId ?? operation.adId, 'resource ID');
-      break;
-    case 'negative_keyword_add':
-      if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId');
-      if (!operation.text.trim()) throw new Error('Negative keyword text cannot be empty.');
-      break;
-    case 'ad_status':
-      assertId(operation.adId, 'adId');
-      break;
-    case 'campaign_goal':
-      if (!operation.category || !operation.origin) throw new Error('Campaign goal category and origin are required.');
-      break;
-    case 'custom_conversion_goal':
-      if (!operation.name.trim()) throw new Error('Custom conversion goal name cannot be empty.');
-      if (operation.conversionActionIds.length === 0) throw new Error('At least one conversion action is required for a custom conversion goal.');
-      operation.conversionActionIds.forEach((id) => assertId(id, 'conversionActionId'));
-      break;
-    case 'campaign_status':
-      break;
+    case 'ad_group_status': case 'ad_group_bid': assertId(operation.adGroupId, 'adGroupId'); break;
+    case 'keyword_status': case 'keyword_remove': assertId(operation.keywordId, 'keywordId'); break;
+    case 'negative_keyword_remove': assertId(operation.criterionId, 'criterionId'); if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId'); break;
+    case 'negative_keyword_add': if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId'); if (!operation.text.trim()) throw new Error('Negative keyword text cannot be empty.'); break;
+    case 'ad_status': case 'ad_remove': assertId(operation.adId, 'adId'); break;
+    case 'campaign_goal': if (!operation.category || !operation.origin) throw new Error('Campaign goal category and origin are required.'); break;
+    case 'custom_conversion_goal': if (!operation.name.trim()) throw new Error('Custom conversion goal name cannot be empty.'); if (!operation.conversionActionIds.length) throw new Error('At least one conversion action is required.'); operation.conversionActionIds.forEach((id) => assertId(id, 'conversionActionId')); break;
+    default: break;
   }
 }
 
 async function loadCampaign(campaignId: string) {
   assertId(campaignId, 'campaignId');
-  const [row] = await getCustomer().query(`
-    SELECT
-      campaign.resource_name,
-      campaign.id,
-      campaign.name,
-      campaign.status,
-      campaign.bidding_strategy_type,
-      campaign_budget.resource_name,
-      campaign_budget.amount_micros
-    FROM campaign
-    WHERE campaign.id = ${campaignId}
-    LIMIT 1
-  `);
+  const [row] = await getCustomer().query(`SELECT campaign.resource_name, campaign.id, campaign.name, campaign.status, campaign.bidding_strategy_type, campaign_budget.resource_name, campaign_budget.amount_micros FROM campaign WHERE campaign.id = ${campaignId} LIMIT 1`);
   if (!row?.campaign?.resource_name) throw new Error(`Campaign ${campaignId} was not found or is not accessible.`);
   return row;
 }
@@ -147,55 +68,44 @@ async function validateResourceReferences(campaignId: string, operations: Optimi
   const customer = getCustomer();
   for (const operation of operations) {
     switch (operation.type) {
-      case 'ad_group_status':
-      case 'ad_group_bid': {
+      case 'ad_group_status': case 'ad_group_bid': {
         const [row] = await customer.query(`SELECT ad_group.resource_name FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} LIMIT 1`);
-        if (!row?.ad_group?.resource_name) throw new Error(`Ad group ${operation.adGroupId} does not belong to campaign ${campaignId}.`);
-        break;
+        if (!row?.ad_group?.resource_name) throw new Error(`Ad group ${operation.adGroupId} does not belong to campaign ${campaignId}.`); break;
       }
-      case 'keyword_status':
-      case 'keyword_remove': {
+      case 'keyword_status': case 'keyword_remove': {
         const [row] = await customer.query(`SELECT ad_group_criterion.resource_name FROM keyword_view WHERE campaign.id = ${campaignId} AND ad_group_criterion.criterion_id = ${operation.keywordId} LIMIT 1`);
-        if (!row?.ad_group_criterion?.resource_name) throw new Error(`Keyword ${operation.keywordId} does not belong to campaign ${campaignId}.`);
-        break;
+        if (!row?.ad_group_criterion?.resource_name) throw new Error(`Keyword ${operation.keywordId} does not belong to campaign ${campaignId}.`); break;
       }
       case 'negative_keyword_remove': {
-        const [row] = await customer.query(`SELECT campaign_criterion.resource_name FROM campaign_criterion WHERE campaign.id = ${campaignId} AND campaign_criterion.criterion_id = ${operation.criterionId} AND campaign_criterion.negative = TRUE LIMIT 1`);
-        if (!row?.campaign_criterion?.resource_name) {
-          const [adGroupRow] = operation.adGroupId ? await customer.query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group_criterion.criterion_id = ${operation.criterionId} AND ad_group_criterion.negative = TRUE LIMIT 1`) : [];
-          if (!adGroupRow?.ad_group_criterion?.resource_name) throw new Error(`Negative keyword ${operation.criterionId} was not found in campaign ${campaignId}.`);
-        }
+        const campaignRows = await customer.query(`SELECT campaign_criterion.resource_name FROM campaign_criterion WHERE campaign.id = ${campaignId} AND campaign_criterion.criterion_id = ${operation.criterionId} AND campaign_criterion.negative = TRUE LIMIT 1`);
+        if (!campaignRows[0]?.campaign_criterion?.resource_name && operation.adGroupId) {
+          const [row] = await customer.query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group_criterion.criterion_id = ${operation.criterionId} AND ad_group_criterion.negative = TRUE LIMIT 1`);
+          if (!row?.ad_group_criterion?.resource_name) throw new Error(`Negative keyword ${operation.criterionId} was not found.`);
+        } else if (!campaignRows[0]?.campaign_criterion?.resource_name) throw new Error(`Campaign negative keyword ${operation.criterionId} was not found.`);
         break;
       }
-      case 'ad_status':
-      case 'ad_remove': {
+      case 'ad_status': case 'ad_remove': {
         const [row] = await customer.query(`SELECT ad_group_ad.resource_name FROM ad_group_ad WHERE campaign.id = ${campaignId} AND ad_group_ad.ad.id = ${operation.adId} LIMIT 1`);
-        if (!row?.ad_group_ad?.resource_name) throw new Error(`Ad ${operation.adId} does not belong to campaign ${campaignId}.`);
-        break;
+        if (!row?.ad_group_ad?.resource_name) throw new Error(`Ad ${operation.adId} does not belong to campaign ${campaignId}.`); break;
       }
       case 'campaign_goal': {
-        const [row] = await customer.query(`SELECT campaign_conversion_goal.resource_name FROM campaign_conversion_goal WHERE campaign.id = ${campaignId} AND campaign_conversion_goal.category = ${operation.category} AND campaign_conversion_goal.origin = ${operation.origin} LIMIT 1`);
-        if (!row?.campaign_conversion_goal?.resource_name) throw new Error(`Campaign conversion goal ${operation.category}/${operation.origin} was not found.`);
-        break;
+        const [row] = await customer.query(`SELECT campaign_conversion_goal.resource_name FROM campaign_conversion_goal WHERE campaign.id = ${campaignId} AND campaign_conversion_goal.category = '${operation.category}' AND campaign_conversion_goal.origin = '${operation.origin}' LIMIT 1`);
+        if (!row?.campaign_conversion_goal?.resource_name) throw new Error(`Campaign conversion goal ${operation.category}/${operation.origin} was not found.`); break;
       }
       case 'custom_conversion_goal': {
         const conversionCustomer = await conversionCustomerId();
-        const ids = operation.conversionActionIds.join(',');
-        const rows = await getCustomerFor(conversionCustomer).query(`SELECT conversion_action.id FROM conversion_action WHERE conversion_action.id IN (${ids}) LIMIT ${operation.conversionActionIds.length}`);
-        if (rows.length !== operation.conversionActionIds.length) throw new Error('One or more conversion actions are not accessible from the conversion customer.');
-        break;
+        const rows = await getCustomerFor(conversionCustomer).query(`SELECT conversion_action.id FROM conversion_action WHERE conversion_action.id IN (${operation.conversionActionIds.join(',')})`);
+        if (rows.length !== operation.conversionActionIds.length) throw new Error('One or more conversion actions are not accessible from the conversion customer.'); break;
       }
-      default:
-        break;
+      default: break;
     }
   }
 }
 
 async function conversionCustomerId(): Promise<string> {
-  const [row] = await getCustomer().query(`SELECT customer.id, customer.conversion_tracking_setting.google_ads_conversion_customer FROM customer LIMIT 1`);
+  const [row] = await getCustomer().query('SELECT customer.id, customer.conversion_tracking_setting.google_ads_conversion_customer FROM customer LIMIT 1');
   const resourceName = row?.customer?.conversion_tracking_setting?.google_ads_conversion_customer;
-  if (typeof resourceName === 'string' && resourceName) return resourceName.split('/')[1];
-  return getCustomer().credentials.customer_id;
+  return typeof resourceName === 'string' && resourceName ? resourceName.split('/')[1] : getCustomer().credentials.customer_id;
 }
 
 export async function validateCampaignOptimization(input: CampaignOptimization) {
@@ -204,31 +114,11 @@ export async function validateCampaignOptimization(input: CampaignOptimization) 
   input.operations.forEach(validateOperation);
   const campaign = await loadCampaign(input.campaignId);
   await validateResourceReferences(input.campaignId, input.operations);
-  return {
-    valid: true as const,
-    campaign: {
-      id: campaign.campaign.id,
-      name: campaign.campaign.name,
-      status: campaign.campaign.status,
-      biddingStrategyType: campaign.campaign.bidding_strategy_type,
-      dailyBudgetMicros: String(campaign.campaign_budget?.amount_micros ?? 0),
-    },
-    operations: input.operations,
-  };
+  return { valid: true as const, campaign: { id: campaign.campaign.id, name: campaign.campaign.name, status: campaign.campaign.status, biddingStrategyType: campaign.campaign.bidding_strategy_type, dailyBudgetMicros: String(campaign.campaign_budget?.amount_micros ?? 0) }, operations: input.operations };
 }
-
 export async function previewCampaignOptimization(input: CampaignOptimization) {
-  const validation = await validateCampaignOptimization(input);
-  const expiresAt = Date.now() + PLAN_TTL_MS;
-  const plan: OptimizationPlan = {
-    version: 1,
-    customerId: getCustomer().credentials.customer_id,
-    campaignId: input.campaignId,
-    operations: input.operations,
-    expectedCampaignStatus: String(validation.campaign.status),
-    expectedBudgetMicros: validation.campaign.dailyBudgetMicros,
-    expiresAt,
-  };
+  const validation = await validateCampaignOptimization(input); const expiresAt = Date.now() + PLAN_TTL_MS;
+  const plan: OptimizationPlan = { version: 1, customerId: getCustomer().credentials.customer_id, campaignId: input.campaignId, operations: input.operations, expectedCampaignStatus: String(validation.campaign.status), expectedBudgetMicros: validation.campaign.dailyBudgetMicros, expiresAt };
   return { ...validation, expiresAt: new Date(expiresAt).toISOString(), confirmationToken: encodePlan(plan) };
 }
 
@@ -242,77 +132,42 @@ function campaignBiddingResource(operation: Extract<OptimizationOperation, { typ
   }
 }
 
-async function applyOperation(campaignId: string, operation: OptimizationOperation): Promise<unknown> {
-  const customer = getCustomer();
-  const customerId = customer.credentials.customer_id;
-  switch (operation.type) {
-    case 'campaign_status':
-      return customer.campaigns.update([{ resource_name: ResourceNames.campaign(customerId, campaignId), status: operation.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED }]);
-    case 'campaign_budget': {
-      const [row] = await customer.query(`SELECT campaign_budget.resource_name FROM campaign WHERE campaign.id = ${campaignId} LIMIT 1`);
-      if (!row?.campaign_budget?.resource_name) throw new Error('Campaign budget resource is unavailable.');
-      return customer.campaignBudgets.update([{ resource_name: row.campaign_budget.resource_name, amount_micros: operation.dailyBudgetMicros }]);
-    }
-    case 'campaign_bidding':
-      return customer.campaigns.update([{ resource_name: ResourceNames.campaign(customerId, campaignId), ...campaignBiddingResource(operation) }]);
-    case 'ad_group_status':
-      return customer.adGroups.update([{ resource_name: ResourceNames.adGroup(customerId, operation.adGroupId), status: operation.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED }]);
-    case 'ad_group_bid':
-      return customer.adGroups.update([{ resource_name: ResourceNames.adGroup(customerId, operation.adGroupId), ...(operation.cpcBidMicros !== undefined ? { cpc_bid_micros: operation.cpcBidMicros } : {}), ...(operation.targetCpaMicros !== undefined ? { target_cpa_micros: operation.targetCpaMicros } : {}), ...(operation.targetRoas !== undefined ? { target_roas: operation.targetRoas } : {}) }]);
-    case 'keyword_status':
-      return customer.adGroupCriteria.update([{ resource_name: ResourceNames.adGroupCriterion(customerId, operation.keywordId), status: operation.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED }]);
-    case 'keyword_remove':
-      return customer.adGroupCriteria.remove([ResourceNames.adGroupCriterion(customerId, operation.keywordId)]);
-    case 'negative_keyword_add': {
-      const keyword = { text: operation.text.trim(), match_type: enums.KeywordMatchType[operation.matchType] };
-      if (operation.adGroupId) return customer.adGroupCriteria.create([{ ad_group: ResourceNames.adGroup(customerId, operation.adGroupId), negative: true, keyword, status: enums.AdGroupCriterionStatus.ENABLED }]);
-      return customer.campaignCriteria.create([{ campaign: ResourceNames.campaign(customerId, campaignId), negative: true, keyword, status: enums.CampaignCriterionStatus.ENABLED }]);
-    }
-    case 'negative_keyword_remove':
-      return operation.adGroupId
-        ? customer.adGroupCriteria.remove([ResourceNames.adGroupCriterion(customerId, operation.criterionId)])
-        : customer.campaignCriteria.remove([ResourceNames.campaignCriterion(customerId, campaignId, operation.criterionId)]);
-    case 'ad_status':
-      return customer.adGroupAds.update([{ resource_name: ResourceNames.adGroupAd(customerId, '', operation.adId), status: operation.status === 'ENABLED' ? enums.AdGroupAdStatus.ENABLED : enums.AdGroupAdStatus.PAUSED }]);
-    case 'ad_remove':
-      return customer.adGroupAds.remove([`customers/${customerId}/adGroupAds/${operation.adId}`]);
-    case 'campaign_goal':
-      return customer.campaignConversionGoals.update([{ resource_name: `customers/${customerId}/campaignConversionGoals/${campaignId}~${operation.category}~${operation.origin}`, biddable: operation.biddable }]);
-    case 'campaign_goal_reset_to_customer':
-      return customer.conversionGoalCampaignConfigs.update([{ resource_name: ResourceNames.conversionGoalCampaignConfig(customerId, campaignId), goal_config_level: enums.GoalConfigLevel.CUSTOMER }]);
-    case 'custom_conversion_goal': {
-      const conversionCustomerId = await conversionCustomerIdForMutation();
-      const conversionCustomer = getCustomerFor(conversionCustomerId);
-      const createResult = await conversionCustomer.customConversionGoals.create([{ name: operation.name, conversion_actions: operation.conversionActionIds.map((id) => ResourceNames.conversionAction(conversionCustomerId, id)) }]);
-      const customGoalResourceName = createResult.results?.[0]?.resource_name;
-      if (!customGoalResourceName) throw new Error('Google Ads did not return the created custom conversion goal resource name.');
-      const configResult = await customer.conversionGoalCampaignConfigs.update([{ resource_name: ResourceNames.conversionGoalCampaignConfig(customerId, campaignId), custom_conversion_goal: customGoalResourceName }]);
-      const goals = await customer.query(`SELECT campaign_conversion_goal.resource_name, campaign_conversion_goal.biddable FROM campaign_conversion_goal WHERE campaign.id = ${campaignId}`);
-      const goalUpdates = goals.map((row) => ({ resource_name: row.campaign_conversion_goal.resource_name, biddable: false }));
-      const goalResult = goalUpdates.length ? await customer.campaignConversionGoals.update(goalUpdates) : undefined;
-      return { customGoal: createResult, campaignConfig: configResult, campaignGoals: goalResult };
-    }
-  }
+async function mutate(operation: Record<string, unknown>) { return getCustomer().mutateResources([operation as never], { partial_failure: false }); }
+async function keywordResource(campaignId: string, keywordId: string): Promise<string> {
+  const [row] = await getCustomer().query(`SELECT ad_group_criterion.resource_name FROM keyword_view WHERE campaign.id = ${campaignId} AND ad_group_criterion.criterion_id = ${keywordId} LIMIT 1`);
+  if (!row?.ad_group_criterion?.resource_name) throw new Error(`Keyword ${keywordId} was not found.`); return row.ad_group_criterion.resource_name;
+}
+async function adResource(campaignId: string, adId: string): Promise<string> {
+  const [row] = await getCustomer().query(`SELECT ad_group_ad.resource_name FROM ad_group_ad WHERE campaign.id = ${campaignId} AND ad_group_ad.ad.id = ${adId} LIMIT 1`);
+  if (!row?.ad_group_ad?.resource_name) throw new Error(`Ad ${adId} was not found.`); return row.ad_group_ad.resource_name;
 }
 
-async function conversionCustomerIdForMutation(): Promise<string> {
-  return conversionCustomerId();
+async function applyOperation(campaignId: string, operation: OptimizationOperation): Promise<unknown> {
+  const customer = getCustomer(); const customerId = customer.credentials.customer_id; const campaignResource = `customers/${customerId}/campaigns/${campaignId}`;
+  switch (operation.type) {
+    case 'campaign_status': return mutate({ entity: 'campaign', operation: 'update', resource: { resource_name: campaignResource, status: operation.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED } });
+    case 'campaign_budget': { const [row] = await customer.query(`SELECT campaign_budget.resource_name FROM campaign WHERE campaign.id = ${campaignId} LIMIT 1`); if (!row?.campaign_budget?.resource_name) throw new Error('Campaign budget resource is unavailable.'); return mutate({ entity: 'campaign_budget', operation: 'update', resource: { resource_name: row.campaign_budget.resource_name, amount_micros: operation.dailyBudgetMicros } }); }
+    case 'campaign_bidding': return mutate({ entity: 'campaign', operation: 'update', resource: { resource_name: campaignResource, ...campaignBiddingResource(operation) } });
+    case 'ad_group_status': return mutate({ entity: 'ad_group', operation: 'update', resource: { resource_name: `customers/${customerId}/adGroups/${operation.adGroupId}`, status: operation.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED } });
+    case 'ad_group_bid': return mutate({ entity: 'ad_group', operation: 'update', resource: { resource_name: `customers/${customerId}/adGroups/${operation.adGroupId}`, ...(operation.cpcBidMicros !== undefined ? { cpc_bid_micros: operation.cpcBidMicros } : {}), ...(operation.targetCpaMicros !== undefined ? { target_cpa_micros: operation.targetCpaMicros } : {}), ...(operation.targetRoas !== undefined ? { target_roas: operation.targetRoas } : {}) } });
+    case 'keyword_status': return mutate({ entity: 'ad_group_criterion', operation: 'update', resource: { resource_name: await keywordResource(campaignId, operation.keywordId), status: operation.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED } });
+    case 'keyword_remove': return mutate({ entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: await keywordResource(campaignId, operation.keywordId) } });
+    case 'negative_keyword_add': { const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD; if (operation.adGroupId) return mutate({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.AdGroupCriterionStatus.ENABLED } }); return mutate({ entity: 'campaign_criterion', operation: 'create', resource: { campaign: campaignResource, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.CampaignCriterionStatus.ENABLED } }); }
+    case 'negative_keyword_remove': return mutate({ entity: operation.adGroupId ? 'ad_group_criterion' : 'campaign_criterion', operation: 'remove', resource: { resource_name: operation.adGroupId ? `customers/${customerId}/adGroupCriteria/${operation.adGroupId}~${operation.criterionId}` : `customers/${customerId}/campaignCriteria/${campaignId}~${operation.criterionId}` } });
+    case 'ad_status': return mutate({ entity: 'ad_group_ad', operation: 'update', resource: { resource_name: await adResource(campaignId, operation.adId), status: operation.status === 'ENABLED' ? enums.AdGroupAdStatus.ENABLED : enums.AdGroupAdStatus.PAUSED } });
+    case 'ad_remove': return mutate({ entity: 'ad_group_ad', operation: 'remove', resource: { resource_name: await adResource(campaignId, operation.adId) } });
+    case 'campaign_goal': return mutate({ entity: 'campaign_conversion_goal', operation: 'update', resource: { resource_name: `customers/${customerId}/campaignConversionGoals/${campaignId}~${operation.category}~${operation.origin}`, biddable: operation.biddable } });
+    case 'campaign_goal_reset_to_customer': return mutate({ entity: 'conversion_goal_campaign_config', operation: 'update', resource: { resource_name: `customers/${customerId}/conversionGoalCampaignConfigs/${campaignId}`, goal_config_level: enums.GoalConfigLevel.CUSTOMER } });
+    case 'custom_conversion_goal': { const conversionCustomerId = await conversionCustomerIdForMutation(); const conversionCustomer = getCustomerFor(conversionCustomerId); const created = await conversionCustomer.mutateResources([{ entity: 'custom_conversion_goal', operation: 'create', resource: { name: operation.name, conversion_actions: operation.conversionActionIds.map((id) => `customers/${conversionCustomerId}/conversionActions/${id}`) } } as never]); const resourceName = created.results?.[0]?.resource_name; if (!resourceName) throw new Error('Google Ads did not return the created custom conversion goal resource name.'); await mutate({ entity: 'conversion_goal_campaign_config', operation: 'update', resource: { resource_name: `customers/${customerId}/conversionGoalCampaignConfigs/${campaignId}`, custom_conversion_goal: resourceName } }); const goals = await customer.query(`SELECT campaign_conversion_goal.resource_name FROM campaign_conversion_goal WHERE campaign.id = ${campaignId}`); if (goals.length) await customer.mutateResources(goals.map((row) => ({ entity: 'campaign_conversion_goal', operation: 'update', resource: { resource_name: row.campaign_conversion_goal.resource_name, biddable: false } })) as never[], { partial_failure: false }); return { created, resourceName }; }
+  }
 }
+async function conversionCustomerIdForMutation(): Promise<string> { return conversionCustomerId(); }
 
 export async function applyCampaignOptimization(confirmationToken: string) {
-  const plan = decodePlan(confirmationToken);
-  const campaign = await loadCampaign(plan.campaignId);
+  const plan = decodePlan(confirmationToken); const campaign = await loadCampaign(plan.campaignId);
   if (String(campaign.campaign.status) !== plan.expectedCampaignStatus || String(campaign.campaign_budget?.amount_micros ?? 0) !== plan.expectedBudgetMicros) throw new Error('Campaign state changed since the preview. Generate a new preview.');
   await validateResourceReferences(plan.campaignId, plan.operations);
-
   const results: Array<{ operation: OptimizationOperation; result: unknown }> = [];
-  for (const operation of plan.operations) {
-    results.push({ operation, result: await applyOperation(plan.campaignId, operation) });
-  }
-  return {
-    applied: true,
-    campaignId: plan.campaignId,
-    operationCount: results.length,
-    results,
-  };
+  for (const operation of plan.operations) results.push({ operation, result: await applyOperation(plan.campaignId, operation) });
+  return { applied: true, campaignId: plan.campaignId, operationCount: results.length, results };
 }
