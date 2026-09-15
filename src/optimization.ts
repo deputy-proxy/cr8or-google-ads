@@ -64,6 +64,12 @@ async function loadCampaign(campaignId: string) {
   return row;
 }
 
+async function conversionCustomerId(): Promise<string> {
+  const [row] = await getCustomer().query('SELECT customer.id, customer.conversion_tracking_setting.google_ads_conversion_customer FROM customer LIMIT 1');
+  const resourceName = row?.customer?.conversion_tracking_setting?.google_ads_conversion_customer;
+  return typeof resourceName === 'string' && resourceName ? resourceName.split('/')[1] : getCustomer().credentials.customer_id;
+}
+
 async function validateResourceReferences(campaignId: string, operations: OptimizationOperation[]): Promise<void> {
   const customer = getCustomer();
   for (const operation of operations) {
@@ -102,12 +108,6 @@ async function validateResourceReferences(campaignId: string, operations: Optimi
   }
 }
 
-async function conversionCustomerId(): Promise<string> {
-  const [row] = await getCustomer().query('SELECT customer.id, customer.conversion_tracking_setting.google_ads_conversion_customer FROM customer LIMIT 1');
-  const resourceName = row?.customer?.conversion_tracking_setting?.google_ads_conversion_customer;
-  return typeof resourceName === 'string' && resourceName ? resourceName.split('/')[1] : getCustomer().credentials.customer_id;
-}
-
 export async function validateCampaignOptimization(input: CampaignOptimization) {
   if (!/^\d+$/.test(input.campaignId)) throw new Error('campaignId must be numeric.');
   if (input.operations.length === 0 || input.operations.length > 100) throw new Error('operations must contain between 1 and 100 changes.');
@@ -118,6 +118,7 @@ export async function validateCampaignOptimization(input: CampaignOptimization) 
   await validateResourceReferences(input.campaignId, input.operations);
   return { valid: true as const, campaign: { id: campaignData.id, name: campaignData.name, status: campaignData.status, biddingStrategyType: campaignData.bidding_strategy_type, dailyBudgetMicros: String(campaign.campaign_budget?.amount_micros ?? 0) }, operations: input.operations };
 }
+
 export async function previewCampaignOptimization(input: CampaignOptimization) {
   const validation = await validateCampaignOptimization(input); const expiresAt = Date.now() + PLAN_TTL_MS;
   const plan: OptimizationPlan = { version: 1, customerId: getCustomer().credentials.customer_id, campaignId: input.campaignId, operations: input.operations, expectedCampaignStatus: String(validation.campaign.status), expectedBudgetMicros: validation.campaign.dailyBudgetMicros, expiresAt };
@@ -133,7 +134,10 @@ function campaignBiddingResource(operation: Extract<OptimizationOperation, { typ
     case 'TARGET_ROAS': return { target_roas: { target_roas: operation.targetRoas } };
   }
 }
-async function mutate(operation: Record<string, unknown>) { return getCustomer().mutateResources([operation as never], { partial_failure: false }); }
+
+async function mutate(operation: Record<string, unknown>): Promise<unknown> {
+  return getCustomer().mutateResources([operation as never], { partial_failure: false });
+}
 async function keywordResource(campaignId: string, keywordId: string): Promise<string> { const [row] = await getCustomer().query(`SELECT ad_group_criterion.resource_name FROM keyword_view WHERE campaign.id = ${campaignId} AND ad_group_criterion.criterion_id = ${keywordId} LIMIT 1`); if (!row?.ad_group_criterion?.resource_name) throw new Error(`Keyword ${keywordId} was not found.`); return row.ad_group_criterion.resource_name; }
 async function adResource(campaignId: string, adId: string): Promise<string> { const [row] = await getCustomer().query(`SELECT ad_group_ad.resource_name FROM ad_group_ad WHERE campaign.id = ${campaignId} AND ad_group_ad.ad.id = ${adId} LIMIT 1`); if (!row?.ad_group_ad?.resource_name) throw new Error(`Ad ${adId} was not found.`); return row.ad_group_ad.resource_name; }
 
@@ -154,17 +158,21 @@ async function applyOperation(campaignId: string, operation: OptimizationOperati
     case 'campaign_goal': return mutate({ entity: 'campaign_conversion_goal', operation: 'update', resource: { resource_name: `customers/${customerId}/campaignConversionGoals/${campaignId}~${operation.category}~${operation.origin}`, biddable: operation.biddable } });
     case 'campaign_goal_reset_to_customer': return mutate({ entity: 'conversion_goal_campaign_config', operation: 'update', resource: { resource_name: `customers/${customerId}/conversionGoalCampaignConfigs/${campaignId}`, goal_config_level: enums.GoalConfigLevel.CUSTOMER } });
     case 'custom_conversion_goal': {
-      const conversionCustomerId = await conversionCustomerId(); const conversionCustomer = getCustomerFor(conversionCustomerId);
-      const created = await conversionCustomer.customConversionGoals.create([{ name: operation.name, conversion_actions: operation.conversionActionIds.map((id) => `customers/${conversionCustomerId}/conversionActions/${id}`) }]);
-      const resourceName = created.results?.[0]?.resource_name;
+      const conversionCustomerIdValue = await conversionCustomerId();
+      const conversionCustomer = getCustomerFor(conversionCustomerIdValue);
+      await mutateCustomConversionGoal(conversionCustomer, operation.name, operation.conversionActionIds);
+      const escapedName = operation.name.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const [created] = await conversionCustomer.query(`SELECT custom_conversion_goal.resource_name FROM custom_conversion_goal WHERE custom_conversion_goal.name = '${escapedName}' LIMIT 1`);
+      const resourceName = created?.custom_conversion_goal?.resource_name;
       if (!resourceName) throw new Error('Google Ads did not return the created custom conversion goal resource name.');
       await mutate({ entity: 'conversion_goal_campaign_config', operation: 'update', resource: { resource_name: `customers/${customerId}/conversionGoalCampaignConfigs/${campaignId}`, custom_conversion_goal: resourceName } });
-      const goals = await customer.query(`SELECT campaign_conversion_goal.resource_name FROM campaign_conversion_goal WHERE campaign.id = ${campaignId}`);
-      const goalResources = goals.map((row) => row.campaign_conversion_goal?.resource_name).filter((name): name is string => Boolean(name));
-      if (goalResources.length) await customer.mutateResources(goalResources.map((name) => ({ entity: 'campaign_conversion_goal', operation: 'update', resource: { resource_name: name, biddable: false } })) as never[], { partial_failure: false });
-      return { created, resourceName };
+      return { resourceName };
     }
   }
+}
+
+async function mutateCustomConversionGoal(customer: ReturnType<typeof getCustomerFor>, name: string, conversionActionIds: string[]): Promise<void> {
+  await customer.mutateResources([{ entity: 'custom_conversion_goal', operation: 'create', resource: { name, conversion_actions: conversionActionIds.map((id) => `customers/${customer.credentials.customer_id}/conversionActions/${id}`) } }] as never[], { partial_failure: false });
 }
 
 export async function applyCampaignOptimization(confirmationToken: string) {
