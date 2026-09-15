@@ -30,5 +30,6 @@ export async function listAccessibleCustomers(): Promise<string[]> {
     developer_token: config.developerToken,
   });
 
-  return client.listAccessibleCustomers(config.refreshToken);
+  const response = await client.listAccessibleCustomers(config.refreshToken);
+  return response.resourceNames ?? [];
 }
