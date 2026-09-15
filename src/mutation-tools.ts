@@ -1,9 +1,48 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
+import { applyCampaignOptimization, previewCampaignOptimization, validateCampaignOptimization } from './optimization.js';
 import { applyMutation, previewMutation, validateMutation } from './mutations.js';
-import type { AdGroupChange, KeywordChange, MutationTarget } from './mutations.js';
+import type { AdGroupChange, KeywordChange } from './mutations.js';
 
 const statusChange = z.object({ status: z.enum(['ENABLED', 'PAUSED']) });
+
+const optimizationOperation = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('campaign_status'), status: z.enum(['ENABLED', 'PAUSED']) }),
+  z.object({ type: z.literal('campaign_budget'), dailyBudgetMicros: z.number().int().min(1_000_000).max(100_000_000_000) }),
+  z.object({
+    type: z.literal('campaign_bidding'),
+    strategy: z.enum(['MANUAL_CPC', 'MAXIMIZE_CONVERSIONS', 'MAXIMIZE_CONVERSION_VALUE', 'TARGET_CPA', 'TARGET_ROAS']),
+    targetCpaMicros: z.number().int().min(1_000_000).optional(),
+    targetRoas: z.number().min(0.01).max(1000).optional(),
+  }),
+  z.object({ type: z.literal('ad_group_status'), adGroupId: z.string().regex(/^\d+$/), status: z.enum(['ENABLED', 'PAUSED']) }),
+  z.object({
+    type: z.literal('ad_group_bid'),
+    adGroupId: z.string().regex(/^\d+$/),
+    cpcBidMicros: z.number().int().min(0).optional(),
+    targetCpaMicros: z.number().int().min(1_000_000).optional(),
+    targetRoas: z.number().min(0.01).max(1000).optional(),
+  }),
+  z.object({ type: z.literal('keyword_status'), keywordId: z.string().regex(/^\d+$/), status: z.enum(['ENABLED', 'PAUSED']) }),
+  z.object({ type: z.literal('keyword_remove'), keywordId: z.string().regex(/^\d+$/) }),
+  z.object({
+    type: z.literal('negative_keyword_add'),
+    adGroupId: z.string().regex(/^\d+$/).optional(),
+    text: z.string().min(1).max(80),
+    matchType: z.enum(['EXACT', 'PHRASE', 'BROAD']),
+  }),
+  z.object({ type: z.literal('negative_keyword_remove'), criterionId: z.string().regex(/^\d+$/), adGroupId: z.string().regex(/^\d+$/).optional() }),
+  z.object({ type: z.literal('ad_status'), adId: z.string().regex(/^\d+$/), status: z.enum(['ENABLED', 'PAUSED']) }),
+  z.object({ type: z.literal('ad_remove'), adId: z.string().regex(/^\d+$/) }),
+  z.object({ type: z.literal('campaign_goal'), category: z.string().min(1), origin: z.string().min(1), biddable: z.boolean() }),
+  z.object({ type: z.literal('campaign_goal_reset_to_customer') }),
+  z.object({ type: z.literal('custom_conversion_goal'), name: z.string().min(1).max(255), conversionActionIds: z.array(z.string().regex(/^\d+$/)).min(1).max(50) }),
+]);
+
+const optimizationInput = z.object({
+  campaignId: z.string().regex(/^\d+$/),
+  operations: z.array(optimizationOperation).min(1).max(100),
+});
 
 function json(data: unknown): string {
   return JSON.stringify(data, (_, value) => typeof value === 'bigint' ? value.toString() : value, 2);
@@ -57,4 +96,32 @@ export function registerMutationTools(server: McpServer): void {
   }, async ({ confirmationToken }) => ({
     content: [{ type: 'text', text: json(await applyMutation(confirmationToken)) }],
   }));
+
+  server.registerTool('validate_campaign_optimization', {
+    title: 'Validate campaign optimization',
+    description: 'Validate a batch of campaign optimization changes without modifying Google Ads. Supports campaign budget and bidding, ad groups, keywords, negative keywords, ads, and conversion goals.',
+    inputSchema: optimizationInput,
+  }, async (input) => ({
+    content: [{ type: 'text', text: json(await validateCampaignOptimization(input)) }],
+  }));
+
+  server.registerTool('preview_campaign_optimization', {
+    title: 'Preview campaign optimization',
+    description: 'Validate a batch of campaign optimization changes and return a short-lived confirmation token. No Google Ads changes are made.',
+    inputSchema: optimizationInput,
+  }, async (input) => ({
+    content: [{ type: 'text', text: json(await previewCampaignOptimization(input)) }],
+  }));
+
+  server.registerTool('apply_campaign_optimization', {
+    title: 'Apply confirmed campaign optimization',
+    description: 'Apply a previously previewed batch of campaign optimization changes. The operation refuses to proceed if the campaign state changed after preview.',
+    inputSchema: z.object({ confirmationToken: z.string().min(20) }),
+  }, async ({ confirmationToken }) => {
+    try {
+      return { content: [{ type: 'text', text: json(await applyCampaignOptimization(confirmationToken)) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: json({ error: error instanceof Error ? error.message : String(error) }) }], isError: true };
+    }
+  });
 }
