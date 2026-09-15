@@ -132,8 +132,10 @@ export async function applyMutation(confirmationToken: string) {
       const result = await customer.campaigns.update([{ resource_name: plan.resourceName, status }]);
       return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
     }
-    const result = await customer.campaignBudgets.update([{ resource_name: current.campaign_budget?.resource_name, amount_micros: plan.target.change.dailyBudgetMicros }]);
-    return { applied: true, target: plan.target, resourceName: current.campaign_budget?.resource_name, result };
+    const budgetResourceName = current.campaign_budget?.resource_name;
+    if (!budgetResourceName) throw new Error('Campaign budget resource is unavailable. Generate a new preview.');
+    const result = await customer.campaignBudgets.update([{ resource_name: budgetResourceName, amount_micros: plan.target.change.dailyBudgetMicros }]);
+    return { applied: true, target: plan.target, resourceName: budgetResourceName, result };
   }
   if (plan.target.type === 'ad_group') {
     const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED;
