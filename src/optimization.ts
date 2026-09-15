@@ -2,7 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { enums } from 'google-ads-api';
 import { getCustomer, getCustomerFor } from './google-ads.js';
 
-const PLAN_TTL_MS = 10 * 60 * 1000;
+const PLAN_TTL_MS = 30 * 60 * 1000;
+const MAX_CLOCK_SKEW_MS = 2 * 60 * 1000;
 type MatchType = 'EXACT' | 'PHRASE' | 'BROAD';
 type CriterionStatus = 'ENABLED' | 'PAUSED';
 type OptimizationOperation =
@@ -22,7 +23,7 @@ type OptimizationOperation =
   | { type: 'custom_conversion_goal'; name: string; conversionActionIds: string[] };
 
 export interface CampaignOptimization { campaignId: string; operations: OptimizationOperation[]; }
-interface OptimizationPlan { version: 1; customerId: string; campaignId: string; operations: OptimizationOperation[]; expectedCampaignStatus: string; expectedBudgetMicros: string; expiresAt: number; }
+interface OptimizationPlan { version: 2; customerId: string; campaignId: string; operations: OptimizationOperation[]; expectedCampaignStatus: string; expectedBudgetMicros: string; issuedAt: number; expiresAt: number; }
 
 function mutationSecret(): string { const secret = process.env.MCP_AUTH_TOKEN; if (!secret) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN'); return secret; }
 function sign(value: string): string { return createHmac('sha256', mutationSecret()).update(value).digest('base64url'); }
@@ -34,7 +35,12 @@ function decodePlan(token: string): OptimizationPlan {
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('Invalid confirmation token.');
   let plan: OptimizationPlan;
   try { plan = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as OptimizationPlan; } catch { throw new Error('Invalid confirmation token.'); }
-  if (plan.version !== 1 || Date.now() > plan.expiresAt) throw new Error('Confirmation token has expired. Generate a new preview.');
+  const now = Date.now();
+  if (plan.version !== 2 || !Number.isFinite(plan.issuedAt) || !Number.isFinite(plan.expiresAt) || plan.expiresAt <= plan.issuedAt || now > plan.expiresAt + MAX_CLOCK_SKEW_MS) {
+    const issuedAt = Number.isFinite(plan.issuedAt) ? new Date(plan.issuedAt).toISOString() : 'invalid';
+    const expiresAt = Number.isFinite(plan.expiresAt) ? new Date(plan.expiresAt).toISOString() : 'invalid';
+    throw new Error(`Confirmation token has expired or is invalid. issuedAt=${issuedAt}; expiresAt=${expiresAt}; serverNow=${new Date(now).toISOString()}. Generate a new preview.`);
+  }
   return plan;
 }
 function assertId(value: string, name: string): void { if (!/^\d+$/.test(value)) throw new Error(`${name} must be a numeric Google Ads ID.`); }
@@ -120,9 +126,10 @@ export async function validateCampaignOptimization(input: CampaignOptimization) 
 }
 
 export async function previewCampaignOptimization(input: CampaignOptimization) {
-  const validation = await validateCampaignOptimization(input); const expiresAt = Date.now() + PLAN_TTL_MS;
-  const plan: OptimizationPlan = { version: 1, customerId: getCustomer().credentials.customer_id, campaignId: input.campaignId, operations: input.operations, expectedCampaignStatus: String(validation.campaign.status), expectedBudgetMicros: validation.campaign.dailyBudgetMicros, expiresAt };
-  return { ...validation, expiresAt: new Date(expiresAt).toISOString(), confirmationToken: encodePlan(plan) };
+  const validation = await validateCampaignOptimization(input); const issuedAt = Date.now(); const expiresAt = issuedAt + PLAN_TTL_MS;
+  if (!Number.isSafeInteger(issuedAt) || !Number.isSafeInteger(expiresAt) || expiresAt <= issuedAt) throw new Error('Unable to create a valid confirmation expiry timestamp.');
+  const plan: OptimizationPlan = { version: 2, customerId: getCustomer().credentials.customer_id, campaignId: input.campaignId, operations: input.operations, expectedCampaignStatus: String(validation.campaign.status), expectedBudgetMicros: validation.campaign.dailyBudgetMicros, issuedAt, expiresAt };
+  return { ...validation, issuedAt: new Date(issuedAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), confirmationToken: encodePlan(plan) };
 }
 
 function campaignBiddingResource(operation: Extract<OptimizationOperation, { type: 'campaign_bidding' }>) {
