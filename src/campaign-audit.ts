@@ -218,7 +218,8 @@ export async function auditCampaign(
         metrics.cost_micros,
         metrics.conversions,
         metrics.cost_per_conversion,
-        metrics.conversions_value
+        metrics.conversions_value,
+        metrics.conversions_from_interactions_rate
       FROM campaign
       WHERE ${campaignWhere}
         AND ${dateFilter}
