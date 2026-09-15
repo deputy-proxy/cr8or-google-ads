@@ -29,16 +29,14 @@ interface MutationPlan {
 const PLAN_TTL_MS = 10 * 60 * 1000;
 const MIN_DAILY_BUDGET_MICROS = 1_000_000;
 const MAX_DAILY_BUDGET_MICROS = 100_000_000_000;
+type StatusChange = { status: 'ENABLED' | 'PAUSED' };
 function mutationSecret(): string {
   const secret = process.env.MCP_AUTH_TOKEN;
   if (!secret) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN');
   return secret;
 }
 function sign(value: string): string { return createHmac('sha256', mutationSecret()).update(value).digest('base64url'); }
-function encodePlan(plan: MutationPlan): string {
-  const payload = Buffer.from(JSON.stringify(plan)).toString('base64url');
-  return `${payload}.${sign(payload)}`;
-}
+function encodePlan(plan: MutationPlan): string { const payload = Buffer.from(JSON.stringify(plan)).toString('base64url'); return `${payload}.${sign(payload)}`; }
 function decodePlan(token: string): MutationPlan {
   const [payload, signature] = token.split('.');
   if (!payload || !signature) throw new Error('Invalid confirmation token.');
@@ -50,11 +48,9 @@ function decodePlan(token: string): MutationPlan {
   if (plan.version !== 2 || !plan.expiresAt || Date.now() > plan.expiresAt) throw new Error('Confirmation token has expired. Generate a new preview.');
   return plan;
 }
-function validateStatus(status: 'ENABLED' | 'PAUSED'): void {
-  if (status !== 'ENABLED' && status !== 'PAUSED') throw new Error('Status must be ENABLED or PAUSED.');
-}
+function validateStatus(status: 'ENABLED' | 'PAUSED'): void { if (status !== 'ENABLED' && status !== 'PAUSED') throw new Error('Status must be ENABLED or PAUSED.'); }
 function validateCampaignMutationChange(change: CampaignChange): void {
-  if ('status' in change) { validateStatus(change.status); return; }
+  if ('status' in change) { validateStatus(change.status as 'ENABLED' | 'PAUSED'); return; }
   if (!Number.isSafeInteger(change.dailyBudgetMicros)) throw new Error('dailyBudgetMicros must be a safe integer.');
   if (change.dailyBudgetMicros < MIN_DAILY_BUDGET_MICROS || change.dailyBudgetMicros > MAX_DAILY_BUDGET_MICROS) throw new Error(`dailyBudgetMicros must be between ${MIN_DAILY_BUDGET_MICROS} and ${MAX_DAILY_BUDGET_MICROS}.`);
 }
@@ -70,7 +66,7 @@ async function loadTarget(target: MutationTarget): Promise<Snapshot> {
 function snapshotStatus(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.status : type === 'ad_group' ? snapshot.ad_group?.status : snapshot.ad_group_criterion?.status; }
 function snapshotResource(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.resource_name : type === 'ad_group' ? snapshot.ad_group?.resource_name : snapshot.ad_group_criterion?.resource_name; }
 export async function validateMutation(target: MutationTarget) {
-  if ('status' in target.change) validateStatus(target.change.status); else validateCampaignMutationChange(target.change);
+  if ('status' in target.change) validateStatus((target.change as StatusChange).status); else validateCampaignMutationChange(target.change);
   const current = await loadTarget(target);
   const status = snapshotStatus(current, target.type);
   const resourceName = snapshotResource(current, target.type);
