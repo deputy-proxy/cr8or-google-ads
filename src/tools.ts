@@ -1,3 +1,4 @@
+import { errors } from 'google-ads-api';
 import { getCustomer, listAccessibleCustomers } from './google-ads.js';
 import { applyCampaignChange, previewCampaignChange, validateCampaignChange } from './mutations.js';
 import type { CampaignChange } from './mutations.js';
@@ -16,6 +17,28 @@ const campaignChange = z.union([
 
 function json(data: unknown): string {
   return JSON.stringify(data, (_, value) => typeof value === 'bigint' ? value.toString() : value, 2);
+}
+
+function googleAdsError(error: unknown): string {
+  if (error instanceof errors.GoogleAdsFailure) {
+    const details = error.errors.map((item) => ({
+      message: item.message,
+      trigger: item.trigger,
+      errorCode: item.error_code,
+      location: item.location,
+    }));
+    return json({
+      error: 'Google Ads API request failed',
+      requestId: error.request_id,
+      details,
+    });
+  }
+
+  if (error instanceof Error) {
+    return json({ error: error.message });
+  }
+
+  return json({ error: String(error) });
 }
 
 function queryWithDateRange(query: string, fromDate?: string, toDate?: string): string {
@@ -45,18 +68,22 @@ export function registerReadTools(server: McpServer): void {
       inputSchema: z.object({}),
     },
     async () => {
-      const customer = getCustomer();
-      const [account] = await customer.query(`
-        SELECT
-          customer.id,
-          customer.descriptive_name,
-          customer.currency_code,
-          customer.time_zone,
-          customer.manager,
-          customer.test_account
-        FROM customer
-      `);
-      return { content: [{ type: 'text', text: json(account) }] };
+      try {
+        const customer = getCustomer();
+        const [account] = await customer.query(`
+          SELECT
+            customer.id,
+            customer.descriptive_name,
+            customer.currency_code,
+            customer.time_zone,
+            customer.manager,
+            customer.test_account
+          FROM customer
+        `);
+        return { content: [{ type: 'text', text: json(account) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: googleAdsError(error) }], isError: true };
+      }
     },
   );
 
@@ -71,25 +98,29 @@ export function registerReadTools(server: McpServer): void {
       }),
     },
     async ({ status, limit }) => {
-      const customer = getCustomer();
-      const where = status === 'ALL' ? '' : `WHERE campaign.status = '${status}'`;
-      const rows = await customer.query(`
-        SELECT
-          campaign.id,
-          campaign.name,
-          campaign.status,
-          campaign.advertising_channel_type,
-          campaign.bidding_strategy_type,
-          campaign_budget.id,
-          campaign_budget.name,
-          campaign_budget.amount_micros,
-          campaign_budget.status
-        FROM campaign
-        ${where}
-        ORDER BY campaign.id
-        LIMIT ${limit}
-      `);
-      return { content: [{ type: 'text', text: json(rows) }] };
+      try {
+        const customer = getCustomer();
+        const where = status === 'ALL' ? '' : `WHERE campaign.status = '${status}'`;
+        const rows = await customer.query(`
+          SELECT
+            campaign.id,
+            campaign.name,
+            campaign.status,
+            campaign.advertising_channel_type,
+            campaign.bidding_strategy_type,
+            campaign_budget.id,
+            campaign_budget.name,
+            campaign_budget.amount_micros,
+            campaign_budget.status
+          FROM campaign
+          ${where}
+          ORDER BY campaign.id
+          LIMIT ${limit}
+        `);
+        return { content: [{ type: 'text', text: json(rows) }] };
+      } catch (error) {
+        return { content: [{ type: 'text', text: googleAdsError(error) }], isError: true };
+      }
     },
   );
 
