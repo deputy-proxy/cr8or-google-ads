@@ -12,7 +12,7 @@ function json(data: unknown): string {
 }
 
 function queryWithDateRange(query: string, fromDate?: string, toDate?: string): string {
-  if (!fromDate && !toDate) return query;
+  if (!fromDate && !toDate) return `${query}\nAND segments.date DURING LAST_30_DAYS`;
   if (!fromDate || !toDate) throw new Error('fromDate and toDate must be provided together.');
   return `${query}\nAND segments.date BETWEEN '${fromDate}' AND '${toDate}'`;
 }
@@ -90,7 +90,7 @@ export function registerReadTools(server: McpServer): void {
     'campaign_performance',
     {
       title: 'Get campaign performance',
-      description: 'Return campaign performance metrics for the configured account. Defaults to the most recent 30 days in Google Ads when no dates are supplied.',
+      description: 'Return campaign performance metrics for the configured account. Defaults to the last 30 days when no dates are supplied.',
       inputSchema: z.object({
         ...dateRange,
         limit: z.number().int().min(1).max(1000).default(100),
@@ -125,7 +125,7 @@ export function registerReadTools(server: McpServer): void {
     'ad_group_performance',
     {
       title: 'Get ad group performance',
-      description: 'Return ad group performance metrics for the configured account.',
+      description: 'Return ad group performance metrics for the configured account. Defaults to the last 30 days when no dates are supplied.',
       inputSchema: z.object({
         ...dateRange,
         limit: z.number().int().min(1).max(1000).default(100),
@@ -160,7 +160,7 @@ export function registerReadTools(server: McpServer): void {
     'keyword_performance',
     {
       title: 'Get keyword performance',
-      description: 'Return keyword performance, status and quality-related fields for the configured account.',
+      description: 'Return keyword performance, status and quality-related fields for the configured account. Defaults to the last 30 days when no dates are supplied.',
       inputSchema: z.object({
         ...dateRange,
         limit: z.number().int().min(1).max(2000).default(200),
@@ -199,7 +199,7 @@ export function registerReadTools(server: McpServer): void {
     'search_terms',
     {
       title: 'Get search terms',
-      description: 'Return actual search terms that triggered ads, with performance metrics.',
+      description: 'Return actual search terms that triggered ads, with performance metrics. Defaults to the last 30 days when no dates are supplied.',
       inputSchema: z.object({
         ...dateRange,
         limit: z.number().int().min(1).max(2000).default(200),
