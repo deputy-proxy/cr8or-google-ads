@@ -8,13 +8,13 @@ export type CampaignChange =
 
 interface CampaignSnapshot {
   campaign: {
-    resource_name?: string;
+    resource_name: string;
     id?: string | number;
     name?: string;
     status?: string;
   };
   campaign_budget: {
-    resource_name?: string;
+    resource_name: string;
     amount_micros?: string | number;
   };
 }
@@ -150,7 +150,7 @@ export async function previewCampaignChange(campaignId: string, change: Campaign
 
   const plan: MutationPlan = {
     version: 1,
-    customerId: getCustomer().credentials.customerId,
+    customerId: getCustomer().credentials.customer_id,
     campaignId,
     campaignResourceName: validation.campaignResourceName,
     campaignBudgetResourceName: validation.campaignBudgetResourceName,
