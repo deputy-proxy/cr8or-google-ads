@@ -252,7 +252,8 @@ export async function auditCampaign(
     `),
   ]);
 
-  const campaign = campaignRows[0];
+  const campaignRow = campaignRows[0];
+  const campaign = campaignRow?.campaign;
   if (!campaign) {
     throw new Error(`Campaign not found: ${campaignId ?? campaignName}`);
   }
@@ -263,7 +264,10 @@ export async function auditCampaign(
       campaign_name: campaign.name,
       date_range: fromDate ? { from: fromDate, to: toDate } : { relative: 'LAST_30_DAYS' },
     },
-    campaign,
+    campaign: {
+      ...campaign,
+      budget: campaignRow.campaign_budget,
+    },
     ad_groups: adGroups,
     keywords,
     negative_keywords: negativeKeywords,
