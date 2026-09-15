@@ -4,6 +4,7 @@ import { loadConfig } from './config.js';
 const COMPATIBILITY_TOKEN = 'unused';
 
 let cached: Customer | undefined;
+const customerCache = new Map<string, Customer>();
 
 function createClient(): GoogleAdsApi {
   const config = loadConfig();
@@ -14,18 +15,26 @@ function createClient(): GoogleAdsApi {
   });
 }
 
-export function getCustomer(): Customer {
-  if (cached) return cached;
+export function getCustomerFor(customerId: string): Customer {
+  const cachedCustomer = customerCache.get(customerId);
+  if (cachedCustomer) return cachedCustomer;
 
   const config = loadConfig();
-  const client = createClient();
-
-  cached = client.Customer({
-    customer_id: config.customerId,
+  const customer = createClient().Customer({
+    customer_id: customerId,
     login_customer_id: config.loginCustomerId,
     refresh_token: config.refreshToken,
   });
 
+  customerCache.set(customerId, customer);
+  return customer;
+}
+
+export function getCustomer(): Customer {
+  if (cached) return cached;
+
+  const config = loadConfig();
+  cached = getCustomerFor(config.customerId);
   return cached;
 }
 
