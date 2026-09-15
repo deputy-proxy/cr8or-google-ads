@@ -1,4 +1,6 @@
 import { getCustomer, listAccessibleCustomers } from './google-ads.js';
+import { applyCampaignChange, previewCampaignChange, validateCampaignChange } from './mutations.js';
+import type { CampaignChange } from './mutations.js';
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
 
@@ -6,6 +8,11 @@ const dateRange = {
   fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('Start date, YYYY-MM-DD'),
   toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('End date, YYYY-MM-DD'),
 };
+
+const campaignChange = z.union([
+  z.object({ status: z.enum(['ENABLED', 'PAUSED']) }),
+  z.object({ dailyBudgetMicros: z.number().int().min(1_000_000).max(100_000_000_000) }),
+]);
 
 function json(data: unknown): string {
   return JSON.stringify(data, (_, value) => typeof value === 'bigint' ? value.toString() : value, 2);
@@ -228,5 +235,49 @@ export function registerReadTools(server: McpServer): void {
       const rows = await customer.query(`${query}\nORDER BY metrics.cost_micros DESC\nLIMIT ${limit}`);
       return { content: [{ type: 'text', text: json(rows) }] };
     },
+  );
+
+  server.registerTool(
+    'validate_campaign_change',
+    {
+      title: 'Validate a campaign change',
+      description: 'Validate a proposed campaign status or daily-budget change without modifying Google Ads.',
+      inputSchema: z.object({
+        campaignId: z.string().regex(/^\d+$/),
+        change: campaignChange,
+      }),
+    },
+    async ({ campaignId, change }) => ({
+      content: [{ type: 'text', text: json(await validateCampaignChange(campaignId, change as CampaignChange)) }],
+    }),
+  );
+
+  server.registerTool(
+    'preview_campaign_change',
+    {
+      title: 'Preview a campaign change',
+      description: 'Validate a proposed campaign change and return the exact current state, requested change and short-lived confirmation token. This tool never modifies Google Ads.',
+      inputSchema: z.object({
+        campaignId: z.string().regex(/^\d+$/),
+        change: campaignChange,
+      }),
+    },
+    async ({ campaignId, change }) => ({
+      content: [{ type: 'text', text: json(await previewCampaignChange(campaignId, change as CampaignChange)) }],
+    }),
+  );
+
+  server.registerTool(
+    'apply_campaign_change',
+    {
+      title: 'Apply a confirmed campaign change',
+      description: 'Apply a previously previewed campaign change. Requires the short-lived confirmation token returned by preview_campaign_change and refuses to act if the campaign changed since preview.',
+      inputSchema: z.object({
+        confirmationToken: z.string().min(20),
+      }),
+    },
+    async ({ confirmationToken }) => ({
+      content: [{ type: 'text', text: json(await applyCampaignChange(confirmationToken)) }],
+    }),
   );
 }
