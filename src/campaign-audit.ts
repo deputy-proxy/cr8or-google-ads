@@ -231,8 +231,7 @@ export async function auditCampaign(
         campaign.id,
         ad_group.id,
         ad_group.name,
-        search_term_view.search_term,
-        search_term_view.status,
+        campaign_search_term_view.search_term,
         segments.keyword.info.text,
         segments.keyword.info.match_type,
         segments.search_term_match_type,
@@ -244,7 +243,7 @@ export async function auditCampaign(
         metrics.cost_micros,
         metrics.conversions,
         metrics.cost_per_conversion
-      FROM search_term_view
+      FROM campaign_search_term_view
       WHERE ${campaignWhere}
         AND ${dateFilter}
       ORDER BY metrics.cost_micros DESC
