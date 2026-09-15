@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
-import { applyCampaignOptimization, previewCampaignOptimization, validateCampaignOptimization } from './optimization.js';
+import { applyCampaignOptimizationForMcp, previewCampaignOptimizationForMcp } from './optimization-confirmation.js';
+import { validateCampaignOptimization } from './optimization.js';
 import { applyMutation, previewMutation, validateMutation } from './mutations.js';
 import type { AdGroupChange, KeywordChange } from './mutations.js';
 
@@ -107,19 +108,19 @@ export function registerMutationTools(server: McpServer): void {
 
   server.registerTool('preview_campaign_optimization', {
     title: 'Preview campaign optimization',
-    description: 'Validate a batch of campaign optimization changes and return a short-lived confirmation token. No Google Ads changes are made.',
+    description: 'Validate a batch of campaign optimization changes and return an opaque short-lived confirmation token. No Google Ads changes are made.',
     inputSchema: optimizationInput,
   }, async (input) => ({
-    content: [{ type: 'text', text: json(await previewCampaignOptimization(input)) }],
+    content: [{ type: 'text', text: json(await previewCampaignOptimizationForMcp(input)) }],
   }));
 
   server.registerTool('apply_campaign_optimization', {
     title: 'Apply confirmed campaign optimization',
-    description: 'Apply a previously previewed batch of campaign optimization changes. The operation refuses to proceed if the campaign state changed after preview.',
+    description: 'Apply a previously previewed batch of campaign optimization changes using its opaque confirmation token. The operation refuses to proceed if the campaign state changed after preview.',
     inputSchema: z.object({ confirmationToken: z.string().min(20) }),
   }, async ({ confirmationToken }) => {
     try {
-      return { content: [{ type: 'text', text: json(await applyCampaignOptimization(confirmationToken)) }] };
+      return { content: [{ type: 'text', text: json(await applyCampaignOptimizationForMcp(confirmationToken)) }] };
     } catch (error) {
       return { content: [{ type: 'text', text: json({ error: error instanceof Error ? error.message : String(error) }) }], isError: true };
     }
