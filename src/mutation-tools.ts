@@ -4,17 +4,11 @@ import { resolveCampaignById, resolveCampaignByName } from './campaign-resolutio
 import { applyCampaignOptimizationForMcp, previewCampaignOptimizationForMcp } from './optimization-confirmation.js';
 import { applyCampaignOptimization, validateCampaignOptimization, previewCampaignOptimization } from './optimization.js';
 import { applyMutation, previewMutation, validateMutation } from './mutations.js';
-import type { AdGroupChange, KeywordChange } from './mutations.js';
-
+import type { AdGroupChange, KeywordChange, KeywordMove } from './mutations.js';
 const statusChange = z.object({ status: z.enum(['ENABLED', 'PAUSED']) });
 const keywordMatchType = z.enum(['EXACT', 'PHRASE', 'BROAD']);
-const adGroupCreate = z.object({
-  type: z.literal('ad_group_create'),
-  name: z.string().trim().min(1).max(255),
-  status: z.enum(['ENABLED', 'PAUSED']).optional(),
-  cpcBidMicros: z.number().int().min(0).max(100_000_000_000).optional(),
-});
-
+const adGroupCreate = z.object({ type: z.literal('ad_group_create'), name: z.string().trim().min(1).max(255), status: z.enum(['ENABLED', 'PAUSED']).optional(), cpcBidMicros: z.number().int().min(0).max(100_000_000_000).optional() });
+const keywordMoveInput = z.object({ campaignId: z.string().regex(/^\d+$/), keywordId: z.string().regex(/^\d+$/), sourceAdGroupId: z.string().regex(/^\d+$/), destinationAdGroupId: z.string().regex(/^\d+$/) }).refine((value) => value.sourceAdGroupId !== value.destinationAdGroupId, { message: 'sourceAdGroupId and destinationAdGroupId must be different.', path: ['destinationAdGroupId'] });
 const optimizationOperation = z.discriminatedUnion('type', [
   z.object({ type: z.literal('campaign_status'), status: z.enum(['ENABLED', 'PAUSED']) }),
   z.object({ type: z.literal('campaign_budget'), dailyBudgetMicros: z.number().int().min(1_000_000).max(100_000_000_000) }),
@@ -33,17 +27,10 @@ const optimizationOperation = z.discriminatedUnion('type', [
   z.object({ type: z.literal('campaign_goal_reset_to_customer') }),
   z.object({ type: z.literal('custom_conversion_goal'), name: z.string().min(1).max(255), conversionActionIds: z.array(z.string().regex(/^\d+$/)).min(1).max(50) }),
 ]);
-
 const optimizationInput = z.object({ campaignName: z.string().min(1).optional(), campaignId: z.string().regex(/^\d+$/).optional(), operations: z.array(optimizationOperation).min(1).max(100) }).refine((value) => Boolean(value.campaignName) !== Boolean(value.campaignId), { message: 'Provide exactly one of campaignName or campaignId.', path: ['campaignName'] });
 const adGroupCreateInput = z.object({ campaignName: z.string().min(1).optional(), campaignId: z.string().regex(/^\d+$/).optional(), name: z.string().trim().min(1).max(255), status: z.enum(['ENABLED', 'PAUSED']).optional(), cpcBidMicros: z.number().int().min(0).max(100_000_000_000).optional() }).refine((value) => Boolean(value.campaignName) !== Boolean(value.campaignId), { message: 'Provide exactly one of campaignName or campaignId.', path: ['campaignName'] });
-
 function json(data: unknown): string { return JSON.stringify(data, (_, value) => typeof value === 'bigint' ? value.toString() : value, 2); }
-async function resolveOptimizationCampaign(campaignName?: string, campaignId?: string) {
-  if (campaignName && campaignId) throw new Error('Provide campaignName or campaignId, not both.');
-  if (!campaignName && !campaignId) throw new Error('Provide campaignName or campaignId.');
-  return campaignName ? resolveCampaignByName(campaignName) : resolveCampaignById(campaignId as string);
-}
-
+async function resolveOptimizationCampaign(campaignName?: string, campaignId?: string) { if (campaignName && campaignId) throw new Error('Provide campaignName or campaignId, not both.'); if (!campaignName && !campaignId) throw new Error('Provide campaignName or campaignId.'); return campaignName ? resolveCampaignByName(campaignName) : resolveCampaignById(campaignId as string); }
 export function registerMutationTools(server: McpServer): void {
   server.registerTool('validate_ad_group_change', { title: 'Validate an ad group change', description: 'Validate an ad group status change without modifying Google Ads.', inputSchema: z.object({ adGroupId: z.string().regex(/^\d+$/), change: statusChange }) }, async ({ adGroupId, change }) => ({ content: [{ type: 'text', text: json(await validateMutation({ type: 'ad_group', id: adGroupId, change: change as AdGroupChange })) }] }));
   server.registerTool('preview_ad_group_change', { title: 'Preview an ad group change', description: 'Validate an ad group status change and return a short-lived confirmation token. This tool never modifies Google Ads.', inputSchema: z.object({ adGroupId: z.string().regex(/^\d+$/), change: statusChange }) }, async ({ adGroupId, change }) => ({ content: [{ type: 'text', text: json(await previewMutation({ type: 'ad_group', id: adGroupId, change: change as AdGroupChange })) }] }));
@@ -51,6 +38,9 @@ export function registerMutationTools(server: McpServer): void {
   server.registerTool('validate_ad_group_create', { title: 'Validate an ad group creation', description: 'Validate creation of a new Search ad group without modifying Google Ads. The campaign must be identified by exact campaignName or campaignId. Names are checked for conflicts within the campaign.', inputSchema: adGroupCreateInput }, async ({ campaignName, campaignId, name, status, cpcBidMicros }) => { const campaign = await resolveOptimizationCampaign(campaignName, campaignId); return { content: [{ type: 'text', text: json(await validateCampaignOptimization({ campaignId: campaign.id, operations: [{ type: 'ad_group_create', name, status, cpcBidMicros }] })) }] }; });
   server.registerTool('preview_ad_group_create', { title: 'Preview an ad group creation', description: 'Validate creation of a new Search ad group and return a short-lived confirmation token. This tool never modifies Google Ads.', inputSchema: adGroupCreateInput }, async ({ campaignName, campaignId, name, status, cpcBidMicros }) => ({ content: [{ type: 'text', text: json(await previewCampaignOptimizationForMcp({ campaignName, campaignId, operations: [{ type: 'ad_group_create', name, status, cpcBidMicros }] })) }] }));
   server.registerTool('apply_ad_group_create', { title: 'Apply a confirmed ad group creation', description: 'Apply a previously previewed ad group creation using its short-lived confirmation token. The server re-resolves and revalidates the campaign immediately before mutation.', inputSchema: z.object({ confirmationToken: z.string().min(20) }) }, async ({ confirmationToken }) => { try { return { content: [{ type: 'text', text: json(await applyCampaignOptimizationForMcp(confirmationToken)) }] }; } catch (error) { return { content: [{ type: 'text', text: json({ error: error instanceof Error ? error.message : String(error) }) }], isError: true }; } });
+  server.registerTool('validate_keyword_move', { title: 'Validate a keyword move', description: 'Validate moving a positive keyword from one ad group to another within the specified campaign. No Google Ads changes are made.', inputSchema: keywordMoveInput }, async (input) => ({ content: [{ type: 'text', text: json(await validateMutation({ type: 'keyword_move', change: input as KeywordMove })) }] }));
+  server.registerTool('preview_keyword_move', { title: 'Preview a keyword move', description: 'Validate a positive keyword move and return a short-lived confirmation token. The source is resolved by campaign, source ad group, and criterion ID, and the destination must not already contain the same positive keyword and match type.', inputSchema: keywordMoveInput }, async (input) => ({ content: [{ type: 'text', text: json(await previewMutation({ type: 'keyword_move', change: input as KeywordMove })) }] }));
+  server.registerTool('apply_keyword_move', { title: 'Apply a confirmed keyword move', description: 'Apply a previously previewed keyword move. The keyword is recreated in the destination with its current text, match type, and status, then the source criterion is removed in the same non-partial-failure mutation request.', inputSchema: z.object({ confirmationToken: z.string().min(20) }) }, async ({ confirmationToken }) => { try { return { content: [{ type: 'text', text: json(await applyMutation(confirmationToken)) }] }; } catch (error) { return { content: [{ type: 'text', text: json({ error: error instanceof Error ? error.message : String(error) }) }], isError: true }; } });
   server.registerTool('validate_keyword_change', { title: 'Validate a keyword change', description: 'Validate a positive keyword status change without modifying Google Ads. adGroupId is required because Google Ads criterion IDs are only unique within an ad group.', inputSchema: z.object({ keywordId: z.string().regex(/^\d+$/), adGroupId: z.string().regex(/^\d+$/), change: statusChange }) }, async ({ keywordId, adGroupId, change }) => ({ content: [{ type: 'text', text: json(await validateMutation({ type: 'keyword', id: keywordId, adGroupId, change: change as KeywordChange })) }] }));
   server.registerTool('preview_keyword_change', { title: 'Preview a keyword change', description: 'Validate a positive keyword status change and return a short-lived confirmation token. adGroupId is required because Google Ads criterion IDs are only unique within an ad group.', inputSchema: z.object({ keywordId: z.string().regex(/^\d+$/), adGroupId: z.string().regex(/^\d+$/), change: statusChange }) }, async ({ keywordId, adGroupId, change }) => ({ content: [{ type: 'text', text: json(await previewMutation({ type: 'keyword', id: keywordId, adGroupId, change: change as KeywordChange })) }] }));
   server.registerTool('apply_keyword_change', { title: 'Apply a confirmed keyword change', description: 'Apply a previously previewed positive keyword status change using its short-lived confirmation token.', inputSchema: z.object({ confirmationToken: z.string().min(20) }) }, async ({ confirmationToken }) => ({ content: [{ type: 'text', text: json(await applyMutation(confirmationToken)) }] }));
@@ -61,10 +51,4 @@ export function registerMutationTools(server: McpServer): void {
   server.registerTool('preview_keyword_create', { title: 'Preview a positive keyword creation', description: 'Validate a positive keyword creation and return a short-lived confirmation token. This tool never modifies Google Ads.', inputSchema: z.object({ campaignId: z.string().regex(/^\d+$/), adGroupId: z.string().regex(/^\d+$/), text: z.string().trim().min(1).max(80), matchType: keywordMatchType, status: z.enum(['ENABLED', 'PAUSED']).optional() }) }, async ({ campaignId, adGroupId, text, matchType, status }) => ({ content: [{ type: 'text', text: json(await previewCampaignOptimization({ campaignId, operations: [{ type: 'keyword_create', adGroupId, text, matchType, status }] })) }] }));
   server.registerTool('apply_keyword_create', { title: 'Apply a confirmed positive keyword creation', description: 'Apply a previously previewed positive keyword creation using its short-lived confirmation token.', inputSchema: z.object({ confirmationToken: z.string().min(20) }) }, async ({ confirmationToken }) => ({ content: [{ type: 'text', text: json(await applyCampaignOptimization(confirmationToken)) }] }));
 }
-
-async function resolveAdGroupCampaignId(adGroupId: string): Promise<string> {
-  const { getCustomer } = await import('./google-ads.js');
-  const [row] = await getCustomer().query(`SELECT campaign.id FROM ad_group WHERE ad_group.id = ${adGroupId} LIMIT 1`);
-  if (!row?.campaign?.id) throw new Error(`Ad group ${adGroupId} was not found or is not accessible.`);
-  return String(row.campaign.id);
-}
+async function resolveAdGroupCampaignId(adGroupId: string): Promise<string> { const { getCustomer } = await import('./google-ads.js'); const [row] = await getCustomer().query(`SELECT campaign.id FROM ad_group WHERE ad_group.id = ${adGroupId} LIMIT 1`); if (!row?.campaign?.id) throw new Error(`Ad group ${adGroupId} was not found or is not accessible.`); return String(row.campaign.id); }
