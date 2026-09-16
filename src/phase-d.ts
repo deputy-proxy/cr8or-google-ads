@@ -21,6 +21,15 @@ type Plan = {
   expiresAt: number;
 };
 
+type KeywordRow = {
+  ad_group_criterion?: { resource_name?: unknown; status?: unknown } | null;
+  keyword?: { text?: unknown; match_type?: unknown } | null;
+};
+
+type AdGroupRow = {
+  ad_group?: { id?: unknown; name?: unknown; status?: unknown } | null;
+};
+
 const secret = () => {
   const value = process.env.MCP_AUTH_TOKEN;
   if (!value) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN');
@@ -101,7 +110,10 @@ async function resolve(campaignId: string, groups: Group[]) {
   if (!campaignRow?.campaign?.resource_name || !campaignRow.campaign) throw new Error(`Campaign ${campaignId} was not found or is not accessible.`);
 
   const existing = await customer.query(`SELECT ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.status != 'REMOVED'`);
-  const existingNames = new Set(existing.map((row) => normalizeName(String(row?.ad_group?.name ?? ''))));
+  const existingNames = new Set(existing.map((rawRow) => {
+    const row = rawRow as AdGroupRow;
+    return normalizeName(String(row.ad_group?.name ?? ''));
+  }));
   const loadedGroups: LoadedGroup[] = [];
 
   for (const group of groups) {
@@ -109,7 +121,8 @@ async function resolve(campaignId: string, groups: Group[]) {
 
     const loadedMoves: LoadedMove[] = [];
     for (const move of group.moves) {
-      const [row] = await customer.query(`SELECT ad_group_criterion.resource_name, ad_group_criterion.status, keyword.text, keyword.match_type FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${move.sourceAdGroupId} AND ad_group_criterion.criterion_id = ${move.keywordId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' LIMIT 1`);
+      const [rawRow] = await customer.query(`SELECT ad_group_criterion.resource_name, ad_group_criterion.status, keyword.text, keyword.match_type FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${move.sourceAdGroupId} AND ad_group_criterion.criterion_id = ${move.keywordId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' LIMIT 1`);
+      const row = rawRow as KeywordRow | undefined;
       const criterion = row?.ad_group_criterion;
       const keyword = row?.keyword;
       if (!criterion?.resource_name || !keyword?.text || !keyword?.match_type) {
@@ -158,7 +171,11 @@ export async function previewCampaignRestructure(input: { campaignId: string; gr
     campaignId: input.campaignId,
     groups: resolved.groups,
     expectedCampaignStatus: String(resolved.campaign.status),
-    expectedGroups: resolved.existing.map((row) => ({ id: String(row.ad_group.id), name: String(row.ad_group.name), status: String(row.ad_group.status) })),
+    expectedGroups: resolved.existing.map((rawRow) => {
+      const row = rawRow as AdGroupRow;
+      if (!row.ad_group) return null;
+      return { id: String(row.ad_group.id), name: String(row.ad_group.name), status: String(row.ad_group.status) };
+    }).filter((group): group is { id: string; name: string; status: string } => group !== null),
     expiresAt,
   };
 
@@ -189,7 +206,10 @@ export async function applyCampaignRestructure(token: string) {
 
   if (
     resolved.existing.length !== plan.expectedGroups.length ||
-    resolved.existing.some((row) => !plan.expectedGroups.some((expected) => expected.id === String(row.ad_group.id) && expected.name === String(row.ad_group.name) && expected.status === String(row.ad_group.status)))
+    resolved.existing.some((rawRow) => {
+      const row = rawRow as AdGroupRow;
+      return !row.ad_group || !plan.expectedGroups.some((expected) => expected.id === String(row.ad_group?.id) && expected.name === String(row.ad_group?.name) && expected.status === String(row.ad_group?.status));
+    })
   ) {
     throw new Error('Campaign ad-group structure changed since preview. Generate a new preview.');
   }
