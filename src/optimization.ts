@@ -14,6 +14,7 @@ type OptimizationOperation =
   | { type: 'ad_group_bid'; adGroupId: string; cpcBidMicros?: number; targetCpaMicros?: number; targetRoas?: number }
   | { type: 'keyword_status'; keywordId: string; adGroupId: string; status: CriterionStatus }
   | { type: 'keyword_remove'; keywordId: string; adGroupId: string }
+  | { type: 'keyword_create'; adGroupId: string; text: string; matchType: MatchType; status?: CriterionStatus }
   | { type: 'negative_keyword_add'; adGroupId?: string; text: string; matchType: MatchType }
   | { type: 'negative_keyword_remove'; criterionId: string; adGroupId?: string }
   | { type: 'ad_status'; adId: string; status: CriterionStatus }
@@ -53,6 +54,7 @@ function validateOperation(operation: OptimizationOperation): void {
       if ((operation.strategy === 'TARGET_ROAS' || operation.strategy === 'MAXIMIZE_CONVERSION_VALUE') && operation.targetRoas !== undefined && (operation.targetRoas < 0.01 || operation.targetRoas > 1000)) throw new Error('targetRoas must be between 0.01 and 1000.');
       break;
     case 'ad_group_status': case 'ad_group_bid': assertId(operation.adGroupId, 'adGroupId'); break;
+    case 'keyword_create': assertId(operation.adGroupId, 'adGroupId'); if (!operation.text.trim()) throw new Error('Keyword text cannot be empty.'); break;
     case 'keyword_status': case 'keyword_remove': assertId(operation.keywordId, 'keywordId'); assertId(operation.adGroupId, 'adGroupId'); break;
     case 'negative_keyword_remove': assertId(operation.criterionId, 'criterionId'); if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId'); break;
     case 'negative_keyword_add': if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId'); if (!operation.text.trim()) throw new Error('Negative keyword text cannot be empty.'); break;
@@ -83,6 +85,14 @@ async function validateResourceReferences(campaignId: string, operations: Optimi
       case 'ad_group_status': case 'ad_group_bid': {
         const [row] = await customer.query(`SELECT ad_group.resource_name FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} LIMIT 1`);
         if (!row?.ad_group?.resource_name) throw new Error(`Ad group ${operation.adGroupId} does not belong to campaign ${campaignId}.`); break;
+      }
+      case 'keyword_create': {
+        const [adGroup] = await customer.query(`SELECT ad_group.resource_name FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group.status != 'REMOVED' LIMIT 1`);
+        if (!adGroup?.ad_group?.resource_name) throw new Error(`Ad group ${operation.adGroupId} does not belong to campaign ${campaignId}.`);
+        const escapedText = operation.text.trim().replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        const [existing] = await customer.query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.keyword.text = '${escapedText}' AND ad_group_criterion.keyword.match_type = ${operation.matchType} LIMIT 1`);
+        if (existing?.ad_group_criterion?.resource_name) throw new Error(`Positive keyword '${operation.text.trim()}' with match type ${operation.matchType} already exists in ad group ${operation.adGroupId}.`);
+        break;
       }
       case 'keyword_status': case 'keyword_remove': {
         const [row] = await customer.query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group_criterion.criterion_id = ${operation.keywordId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' LIMIT 1`);
@@ -162,6 +172,10 @@ async function applyOperation(campaignId: string, operation: OptimizationOperati
     case 'ad_group_bid': return mutate({ entity: 'ad_group', operation: 'update', resource: { resource_name: `customers/${customerId}/adGroups/${operation.adGroupId}`, ...(operation.cpcBidMicros !== undefined ? { cpc_bid_micros: operation.cpcBidMicros } : {}), ...(operation.targetCpaMicros !== undefined ? { target_cpa_micros: operation.targetCpaMicros } : {}), ...(operation.targetRoas !== undefined ? { target_roas: operation.targetRoas } : {}) } });
     case 'keyword_status': return mutate({ entity: 'ad_group_criterion', operation: 'update', resource: { resource_name: await keywordResource(campaignId, operation.keywordId, operation.adGroupId), status: operation.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED } });
     case 'keyword_remove': return mutate({ entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: await keywordResource(campaignId, operation.keywordId, operation.adGroupId) } });
+    case 'keyword_create': {
+      const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD;
+      return mutate({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: false, keyword: { text: operation.text.trim(), match_type: matchType }, status: operation.status === 'PAUSED' ? enums.AdGroupCriterionStatus.PAUSED : enums.AdGroupCriterionStatus.ENABLED } });
+    }
     case 'negative_keyword_add': { const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD; if (operation.adGroupId) return mutate({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.AdGroupCriterionStatus.ENABLED } }); return mutate({ entity: 'campaign_criterion', operation: 'create', resource: { campaign: campaignResource, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.CampaignCriterionStatus.ENABLED } }); }
     case 'negative_keyword_remove': return mutate({ entity: operation.adGroupId ? 'ad_group_criterion' : 'campaign_criterion', operation: 'remove', resource: { resource_name: operation.adGroupId ? `customers/${customerId}/adGroupCriteria/${operation.adGroupId}~${operation.criterionId}` : `customers/${customerId}/campaignCriteria/${campaignId}~${operation.criterionId}` } });
     case 'ad_status': return mutate({ entity: 'ad_group_ad', operation: 'update', resource: { resource_name: await adResource(campaignId, operation.adId), status: operation.status === 'ENABLED' ? enums.AdGroupAdStatus.ENABLED : enums.AdGroupAdStatus.PAUSED } });
