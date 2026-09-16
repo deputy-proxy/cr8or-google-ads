@@ -1,11 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
+import { createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
-import { registerReadTools } from './tools.js';
-import { registerMutationTools } from './mutation-tools.js';
-import { registerPhaseCTools } from './phase-c.js';
-import { registerPhaseDTools } from './phase-d.js';
-import { registerAuditTools } from './audit-tools.js';
+import { createMcpServer } from './mcp/server.js';
 import { handleOAuthAuthorize, handleOAuthCallback, handleOAuthToken, oauthMetadata, protectedResourceMetadata, verifyOAuthAccessToken } from './oauth.js';
 
 const port = Number(process.env.PORT ?? 3000);
@@ -13,16 +9,6 @@ const authToken = process.env.MCP_AUTH_TOKEN;
 const issuer = process.env.OAUTH_ISSUER ?? 'https://cr8or-google-ads-production.up.railway.app';
 
 if (!authToken) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN');
-
-function createMcpServer(): McpServer {
-  const server = new McpServer({ name: 'cr8or-google-ads', version: '0.1.0' });
-  registerReadTools(server);
-  registerMutationTools(server);
-  registerPhaseCTools(server);
-  registerPhaseDTools(server);
-  registerAuditTools(server);
-  return server;
-}
 
 const mcpHandler = createMcpHandler(createMcpServer);
 const nodeHandler = toNodeHandler(mcpHandler);
