@@ -66,7 +66,7 @@ function validateInput(campaignId: string, groups: Group[]): void {
 async function resolve(campaignId: string, groups: Group[]) {
   const customer = getCustomer();
   const [campaignRow] = await customer.query(`SELECT campaign.resource_name, campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.id = ${campaignId} LIMIT 1`);
-  if (!campaignRow?.campaign?.resource_name) throw new Error(`Campaign ${campaignId} was not found or is not accessible.`);
+  if (!campaignRow?.campaign?.resource_name || !campaignRow.campaign) throw new Error(`Campaign ${campaignId} was not found or is not accessible.`);
   const existing = await customer.query(`SELECT ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.status != 'REMOVED'`);
   const existingNames = new Set(existing.map((row) => String(row?.ad_group?.name ?? '').trim().replace(/\s+/g, ' ').toLowerCase()));
   const loadedGroups: LoadedGroup[] = [];
@@ -75,19 +75,23 @@ async function resolve(campaignId: string, groups: Group[]) {
     const loadedMoves: LoadedMove[] = [];
     for (const move of group.moves) {
       const [row] = await customer.query(`SELECT ad_group_criterion.resource_name, ad_group_criterion.status, keyword.text, keyword.match_type FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${move.sourceAdGroupId} AND ad_group_criterion.criterion_id = ${move.keywordId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' LIMIT 1`);
-      if (!row?.ad_group_criterion?.resource_name || !row?.keyword?.text || !row?.keyword?.match_type) throw new Error(`Positive keyword ${move.keywordId} was not found in source ad group ${move.sourceAdGroupId}.`);
-      loadedMoves.push({ ...move, resourceName: String(row.ad_group_criterion.resource_name), text: String(row.keyword.text), matchType: String(row.keyword.match_type), status: String(row.ad_group_criterion.status) });
+      const criterion = row?.ad_group_criterion;
+      const keyword = row?.keyword;
+      if (!criterion?.resource_name || !keyword?.text || !keyword?.match_type) throw new Error(`Positive keyword ${move.keywordId} was not found in source ad group ${move.sourceAdGroupId}.`);
+      loadedMoves.push({ ...move, resourceName: String(criterion.resource_name), text: String(keyword.text), matchType: String(keyword.match_type), status: String(criterion.status) });
     }
     loadedGroups.push({ ...group, moves: loadedMoves });
   }
   return { campaign: campaignRow.campaign, existing, groups: loadedGroups };
 }
+
 export async function validateCampaignRestructure(input: { campaignId: string; groups: Group[] }) {
   validateInput(input.campaignId, input.groups);
   const r = await resolve(input.campaignId, input.groups);
   const customerId = String(getCustomer().credentials.customer_id);
   return { valid: true as const, campaign: { id: r.campaign.id, name: r.campaign.name, status: r.campaign.status }, destinationAdGroups: r.groups.map((g, i) => ({ temporaryResourceName: `customers/${customerId}/adGroups/-${i + 1}`, name: g.name, status: g.status ?? 'ENABLED', moves: g.moves.map(({ keywordId, sourceAdGroupId, text, matchType, status }) => ({ keywordId, sourceAdGroupId, text, matchType, status })) })) };
 }
+
 export async function previewCampaignRestructure(input: { campaignId: string; groups: Group[] }) {
   validateInput(input.campaignId, input.groups);
   const r = await resolve(input.campaignId, input.groups);
@@ -96,12 +100,14 @@ export async function previewCampaignRestructure(input: { campaignId: string; gr
   const plan: Plan = { version: 1, kind: 'campaign_restructure', customerId, campaignId: input.campaignId, groups: r.groups, expectedCampaignStatus: String(r.campaign.status), expectedGroups: r.existing.map((row) => ({ id: String(row.ad_group.id), name: String(row.ad_group.name), status: String(row.ad_group.status) })), expiresAt };
   return { valid: true as const, campaign: { id: r.campaign.id, name: r.campaign.name, status: r.campaign.status }, destinationAdGroups: r.groups.map((g, i) => ({ temporaryResourceName: `customers/${plan.customerId}/adGroups/-${i + 1}`, name: g.name, moves: g.moves.map(({ keywordId, sourceAdGroupId, text, matchType, status }) => ({ keywordId, sourceAdGroupId, text, matchType, status })) })), expiresAt: new Date(expiresAt).toISOString(), confirmationToken: encode(plan) };
 }
+
 export async function applyCampaignRestructure(token: string) {
   const plan = decode(token);
   const inputGroups: Group[] = plan.groups.map((g) => ({ name: g.name, status: g.status, cpcBidMicros: g.cpcBidMicros, moves: g.moves.map(({ keywordId, sourceAdGroupId }) => ({ keywordId, sourceAdGroupId })) }));
   const r = await resolve(plan.campaignId, inputGroups);
   if (String(r.campaign.status) !== plan.expectedCampaignStatus) throw new Error('Campaign status changed since preview. Generate a new preview.');
   if (r.existing.length !== plan.expectedGroups.length || r.existing.some((row) => !plan.expectedGroups.some((expected) => expected.id === String(row.ad_group.id) && expected.name === String(row.ad_group.name) && expected.status === String(row.ad_group.status)))) throw new Error('Campaign ad-group structure changed since preview. Generate a new preview.');
+
   const customerId = String(getCustomer().credentials.customer_id);
   const operations: Record<string, unknown>[] = [];
   const destinations: string[] = [];
@@ -124,11 +130,18 @@ export async function applyCampaignRestructure(token: string) {
     throw new Error(`Google Ads campaign restructure failed: ${json(error)}`);
   }
 }
-const groupInput = z.object({ name: z.string().trim().min(1).max(255), status: z.enum(['ENABLED', 'PAUSED']).optional(), cpcBidMicros: z.number().int().min(0).max(100_000_000_000).optional(), moves: z.array(z.object({ keywordId: z.string().regex(/^\d+$/), sourceAdGroupId: z.string().regex(/^\d+$/) })).max(200) });
+
+const groupInput = z.object({
+  name: z.string().trim().min(1).max(255),
+  status: z.enum(['ENABLED', 'PAUSED']).optional(),
+  cpcBidMicros: z.number().int().min(0).max(100_000_000_000).optional(),
+  moves: z.array(z.object({ keywordId: z.string().regex(/^\d+$/), sourceAdGroupId: z.string().regex(/^\d+$/) })).max(200),
+});
 const input = z.object({ campaignId: z.string().regex(/^\d+$/), groups: z.array(groupInput).min(1).max(20) });
+
 export function registerPhaseDTools(server: McpServer): void {
-  server.registerTool('validate_campaign_restructure', { title: 'Validate campaign restructure', description: 'Validate creation of intent-specific ad groups and positive keyword moves without modifying Google Ads.', inputSchema: input }, async (value) => ({ content: [{ type: 'text', text: json(await validateCampaignRestructure(value)) }] }));
-  server.registerTool('preview_campaign_restructure', { title: 'Preview campaign restructure', description: 'Preview creation of intent-specific ad groups and positive keyword moves and return a short-lived confirmation token.', inputSchema: input }, async (value) => ({ content: [{ type: 'text', text: json(await previewCampaignRestructure(value)) }] }));
+  server.registerTool('validate_campaign_restructure', { title: 'Validate campaign restructure', description: 'Validate creation of intent-specific ad groups and positive keyword moves without modifying Google Ads.', inputSchema: input }, async ({ campaignId, groups }) => ({ content: [{ type: 'text', text: json(await validateCampaignRestructure({ campaignId, groups })) }] }));
+  server.registerTool('preview_campaign_restructure', { title: 'Preview campaign restructure', description: 'Preview creation of intent-specific ad groups and positive keyword moves and return a short-lived confirmation token.', inputSchema: input }, async ({ campaignId, groups }) => ({ content: [{ type: 'text', text: json(await previewCampaignRestructure({ campaignId, groups })) }] }));
   server.registerTool('apply_campaign_restructure', { title: 'Apply confirmed campaign restructure', description: 'Apply a previously previewed restructure as one non-partial-failure Google Ads mutation request after live state revalidation.', inputSchema: z.object({ confirmationToken: z.string().min(20) }) }, async ({ confirmationToken }) => {
     try {
       return { content: [{ type: 'text', text: json(await applyCampaignRestructure(confirmationToken)) }] };
