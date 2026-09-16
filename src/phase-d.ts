@@ -5,10 +5,23 @@ import * as z from 'zod/v4';
 import { getCustomer } from './google-ads.js';
 
 const TTL = 10 * 60 * 1000;
+const MAX_HEADLINES = 15;
+const MAX_DESCRIPTIONS = 4;
+const HEADLINE_MAX = 30;
+const DESCRIPTION_MAX = 90;
+const PATH_MAX = 15;
 
 type Move = { keywordId: string; sourceAdGroupId: string };
+type RsaSpec = {
+  finalUrl: string;
+  headlines: string[];
+  descriptions: string[];
+  path1?: string;
+  path2?: string;
+  status?: 'ENABLED' | 'PAUSED';
+};
 type LoadedMove = Move & { resourceName: string; text: string; matchType: string; status: string };
-type Group = { name: string; status?: 'ENABLED' | 'PAUSED'; cpcBidMicros?: number; moves: Move[] };
+type Group = { name: string; status?: 'ENABLED' | 'PAUSED'; cpcBidMicros?: number; moves: Move[]; rsa?: RsaSpec };
 type LoadedGroup = Omit<Group, 'moves'> & { moves: LoadedMove[] };
 type Plan = {
   version: 1;
@@ -72,6 +85,34 @@ function normalizeName(value: string): string {
   return value.trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function validateRsaSpec(spec: RsaSpec, groupName: string): void {
+  let url: URL;
+  try {
+    url = new URL(spec.finalUrl);
+  } catch {
+    throw new Error(`finalUrl for '${groupName}' must be an absolute URL.`);
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`finalUrl for '${groupName}' must use http or https.`);
+  if (spec.headlines.length < 3 || spec.headlines.length > MAX_HEADLINES) throw new Error(`RSA for '${groupName}' must contain between 3 and ${MAX_HEADLINES} headlines.`);
+  if (spec.descriptions.length < 2 || spec.descriptions.length > MAX_DESCRIPTIONS) throw new Error(`RSA for '${groupName}' must contain between 2 and ${MAX_DESCRIPTIONS} descriptions.`);
+  if (spec.headlines.some((text) => !text.trim() || text.length > HEADLINE_MAX)) throw new Error(`Each RSA headline for '${groupName}' must be non-empty and at most ${HEADLINE_MAX} characters.`);
+  if (spec.descriptions.some((text) => !text.trim() || text.length > DESCRIPTION_MAX)) throw new Error(`Each RSA description for '${groupName}' must be non-empty and at most ${DESCRIPTION_MAX} characters.`);
+  if (spec.path1 !== undefined && (!spec.path1.trim() || spec.path1.length > PATH_MAX)) throw new Error(`RSA path1 for '${groupName}' must be non-empty and at most ${PATH_MAX} characters.`);
+  if (spec.path2 !== undefined && (!spec.path2.trim() || spec.path2.length > PATH_MAX)) throw new Error(`RSA path2 for '${groupName}' must be non-empty and at most ${PATH_MAX} characters.`);
+  if (spec.path2 !== undefined && spec.path1 === undefined) throw new Error(`RSA path2 for '${groupName}' requires path1.`);
+}
+
+function normalizeRsaSpec(spec: RsaSpec): RsaSpec {
+  return {
+    finalUrl: spec.finalUrl.trim(),
+    headlines: spec.headlines.map((text) => text.trim()),
+    descriptions: spec.descriptions.map((text) => text.trim()),
+    ...(spec.path1 !== undefined ? { path1: spec.path1.trim() } : {}),
+    ...(spec.path2 !== undefined ? { path2: spec.path2.trim() } : {}),
+    ...(spec.status !== undefined ? { status: spec.status } : {}),
+  };
+}
+
 function validateInput(campaignId: string, groups: Group[]): void {
   assertId(campaignId, 'campaignId');
   if (groups.length < 1 || groups.length > 20) throw new Error('groups must contain 1-20 entries.');
@@ -91,6 +132,8 @@ function validateInput(campaignId: string, groups: Group[]): void {
     }
 
     if (group.moves.length < 1) throw new Error(`Destination ad group '${group.name.trim()}' must contain at least one keyword move.`);
+
+    if (group.rsa) validateRsaSpec(group.rsa, group.name.trim());
 
     for (const move of group.moves) {
       assertId(move.keywordId, 'keywordId');
@@ -133,7 +176,7 @@ async function resolve(campaignId: string, groups: Group[]) {
         status: String(criterion.status),
       });
     }
-    loadedGroups.push({ ...group, moves: loadedMoves });
+    loadedGroups.push({ ...group, rsa: group.rsa ? normalizeRsaSpec(group.rsa) : undefined, moves: loadedMoves });
   }
 
   return { campaign: campaignRow.campaign, existing, groups: loadedGroups };
@@ -151,6 +194,7 @@ export async function validateCampaignRestructure(input: { campaignId: string; g
       temporaryResourceName: `customers/${customerId}/adGroups/-${index + 1}`,
       name: group.name,
       status: group.status ?? 'ENABLED',
+      rsa: group.rsa ? { finalUrl: group.rsa.finalUrl, headlines: group.rsa.headlines.length, descriptions: group.rsa.descriptions.length, status: group.rsa.status ?? 'ENABLED' } : undefined,
       moves: group.moves.map(({ keywordId, sourceAdGroupId, text, matchType, status }) => ({ keywordId, sourceAdGroupId, text, matchType, status })),
     })),
   };
@@ -181,6 +225,7 @@ export async function previewCampaignRestructure(input: { campaignId: string; gr
     destinationAdGroups: resolved.groups.map((group, index) => ({
       temporaryResourceName: `customers/${plan.customerId}/adGroups/-${index + 1}`,
       name: group.name,
+      rsa: group.rsa ? { finalUrl: group.rsa.finalUrl, headlines: group.rsa.headlines.length, descriptions: group.rsa.descriptions.length, status: group.rsa.status ?? 'ENABLED' } : undefined,
       moves: group.moves.map(({ keywordId, sourceAdGroupId, text, matchType, status }) => ({ keywordId, sourceAdGroupId, text, matchType, status })),
     })),
     expiresAt: new Date(expiresAt).toISOString(),
@@ -196,6 +241,7 @@ export async function applyCampaignRestructure(token: string) {
     name: group.name,
     status: group.status,
     cpcBidMicros: group.cpcBidMicros,
+    rsa: group.rsa,
     moves: group.moves.map(({ keywordId, sourceAdGroupId }) => ({ keywordId, sourceAdGroupId })),
   }));
 
@@ -249,6 +295,27 @@ export async function applyCampaignRestructure(token: string) {
       });
       operations.push({ entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: move.resourceName } });
     });
+
+    if (group.rsa) {
+      const rsa = group.rsa;
+      operations.push({
+        entity: 'ad_group_ad',
+        operation: 'create',
+        resource: {
+          ad_group: destination,
+          status: rsa.status === 'PAUSED' ? enums.AdGroupAdStatus.PAUSED : enums.AdGroupAdStatus.ENABLED,
+          ad: {
+            final_urls: [rsa.finalUrl],
+            responsive_search_ad: {
+              headlines: rsa.headlines.map((text) => ({ text: text.trim() })),
+              descriptions: rsa.descriptions.map((text) => ({ text: text.trim() })),
+              ...(rsa.path1 !== undefined ? { path1: rsa.path1.trim() } : {}),
+              ...(rsa.path2 !== undefined ? { path2: rsa.path2.trim() } : {}),
+            },
+          },
+        },
+      });
+    }
   });
 
   try {
@@ -258,6 +325,7 @@ export async function applyCampaignRestructure(token: string) {
       atomic: true as const,
       campaignId: plan.campaignId,
       createdAdGroups: destinations,
+      createdResponsiveSearchAds: plan.groups.filter((group) => group.rsa).length,
       movedKeywordCount: plan.groups.reduce((count, group) => count + group.moves.length, 0),
       result,
     };
@@ -265,6 +333,15 @@ export async function applyCampaignRestructure(token: string) {
     throw new Error(`Google Ads campaign restructure failed: ${json(error)}`);
   }
 }
+
+const rsaInput = z.object({
+  finalUrl: z.string().url(),
+  headlines: z.array(z.string().trim().min(1).max(HEADLINE_MAX)).min(3).max(MAX_HEADLINES),
+  descriptions: z.array(z.string().trim().min(1).max(DESCRIPTION_MAX)).min(2).max(MAX_DESCRIPTIONS),
+  path1: z.string().trim().min(1).max(PATH_MAX).optional(),
+  path2: z.string().trim().min(1).max(PATH_MAX).optional(),
+  status: z.enum(['ENABLED', 'PAUSED']).optional(),
+}).refine((value) => value.path2 === undefined || value.path1 !== undefined, { message: 'path2 requires path1.', path: ['path2'] });
 
 const groupInput = z.object({
   name: z.string().trim().min(1).max(255),
@@ -274,6 +351,7 @@ const groupInput = z.object({
     keywordId: z.string().regex(/^\d+$/),
     sourceAdGroupId: z.string().regex(/^\d+$/),
   })).min(1).max(200),
+  rsa: rsaInput.optional(),
 });
 
 const input = z.object({
@@ -286,7 +364,7 @@ export function registerPhaseDTools(server: McpServer): void {
     'validate_campaign_restructure',
     {
       title: 'Validate campaign restructure',
-      description: 'Validate creation of intent-specific ad groups and positive keyword moves without modifying Google Ads.',
+      description: 'Validate creation of intent-specific ad groups, optional responsive search ads, and positive keyword moves without modifying Google Ads.',
       inputSchema: input,
     },
     async ({ campaignId, groups }) => ({ content: [{ type: 'text', text: json(await validateCampaignRestructure({ campaignId, groups })) }] }),
@@ -296,7 +374,7 @@ export function registerPhaseDTools(server: McpServer): void {
     'preview_campaign_restructure',
     {
       title: 'Preview campaign restructure',
-      description: 'Preview creation of intent-specific ad groups and positive keyword moves and return a short-lived confirmation token.',
+      description: 'Preview creation of intent-specific ad groups, optional responsive search ads, and positive keyword moves and return a short-lived confirmation token.',
       inputSchema: input,
     },
     async ({ campaignId, groups }) => ({ content: [{ type: 'text', text: json(await previewCampaignRestructure({ campaignId, groups })) }] }),
@@ -306,7 +384,7 @@ export function registerPhaseDTools(server: McpServer): void {
     'apply_campaign_restructure',
     {
       title: 'Apply confirmed campaign restructure',
-      description: 'Apply a previously previewed restructure as one non-partial-failure Google Ads mutation request after live state revalidation.',
+      description: 'Apply a previously previewed restructure as one non-partial-failure Google Ads mutation request, including optional RSAs in newly created ad groups, after live state revalidation.',
       inputSchema: z.object({ confirmationToken: z.string().min(20) }),
     },
     async ({ confirmationToken }) => {
