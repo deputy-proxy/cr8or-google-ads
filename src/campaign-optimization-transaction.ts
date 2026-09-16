@@ -85,10 +85,10 @@ function bidding(operation: Extract<Operation, { type: 'campaign_bidding' }>): {
   }
 }
 
-async function keywordResource(campaignId: string, keywordId: string): Promise<string> {
-  const [row] = await getCustomer().query(`SELECT ad_group_criterion.resource_name FROM keyword_view WHERE campaign.id = ${campaignId} AND ad_group_criterion.criterion_id = ${keywordId} LIMIT 1`);
+async function keywordResource(campaignId: string, keywordId: string, adGroupId: string): Promise<string> {
+  const [row] = await getCustomer().query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${adGroupId} AND ad_group_criterion.criterion_id = ${keywordId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' LIMIT 1`);
   const resourceName = row?.ad_group_criterion?.resource_name;
-  if (typeof resourceName !== 'string' || !resourceName) throw new Error(`Keyword ${keywordId} was not found.`);
+  if (typeof resourceName !== 'string' || !resourceName) throw new Error(`Positive keyword ${keywordId} was not found in ad group ${adGroupId}.`);
   return resourceName;
 }
 
@@ -123,6 +123,19 @@ export async function applyCampaignOptimizationTransaction(input: CampaignOptimi
           mutations.push(update({ resource_name: campaign.resourceName, ...value.resource }, value.paths));
           break;
         }
+        case 'ad_group_create':
+          mutations.push({
+            entity: 'ad_group',
+            operation: 'create',
+            resource: {
+              name: operation.name.trim(),
+              campaign: campaign.resourceName,
+              type: enums.AdGroupType.SEARCH_STANDARD,
+              status: operation.status === 'PAUSED' ? enums.AdGroupStatus.PAUSED : enums.AdGroupStatus.ENABLED,
+              ...(operation.cpcBidMicros !== undefined ? { cpc_bid_micros: operation.cpcBidMicros } : {}),
+            },
+          });
+          break;
         case 'ad_group_status':
           mutations.push(update({ resource_name: `customers/${customerId}/adGroups/${operation.adGroupId}`, status: operation.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED }, ['status']));
           break;
@@ -137,10 +150,10 @@ export async function applyCampaignOptimizationTransaction(input: CampaignOptimi
           break;
         }
         case 'keyword_status':
-          mutations.push(update({ resource_name: await keywordResource(campaign.id, operation.keywordId), status: operation.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED }, ['status']));
+          mutations.push(update({ resource_name: await keywordResource(campaign.id, operation.keywordId, operation.adGroupId), status: operation.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED }, ['status']));
           break;
         case 'keyword_remove':
-          mutations.push({ entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: await keywordResource(campaign.id, operation.keywordId) } });
+          mutations.push({ entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: await keywordResource(campaign.id, operation.keywordId, operation.adGroupId) } });
           break;
         case 'negative_keyword_add': {
           const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD;

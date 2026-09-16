@@ -10,6 +10,7 @@ type OptimizationOperation =
   | { type: 'campaign_status'; status: 'ENABLED' | 'PAUSED' }
   | { type: 'campaign_budget'; dailyBudgetMicros: number }
   | { type: 'campaign_bidding'; strategy: 'MANUAL_CPC' | 'MAXIMIZE_CONVERSIONS' | 'MAXIMIZE_CONVERSION_VALUE' | 'TARGET_CPA' | 'TARGET_ROAS'; targetCpaMicros?: number; targetRoas?: number }
+  | { type: 'ad_group_create'; name: string; status?: CriterionStatus; cpcBidMicros?: number }
   | { type: 'ad_group_status'; adGroupId: string; status: CriterionStatus }
   | { type: 'ad_group_bid'; adGroupId: string; cpcBidMicros?: number; targetCpaMicros?: number; targetRoas?: number }
   | { type: 'keyword_status'; keywordId: string; adGroupId: string; status: CriterionStatus }
@@ -45,6 +46,7 @@ function decodePlan(token: string): OptimizationPlan {
   return plan;
 }
 function assertId(value: string, name: string): void { if (!/^\d+$/.test(value)) throw new Error(`${name} must be a numeric Google Ads ID.`); }
+function normalizeAdGroupName(value: string): string { return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase(); }
 
 function validateOperation(operation: OptimizationOperation): void {
   switch (operation.type) {
@@ -52,6 +54,11 @@ function validateOperation(operation: OptimizationOperation): void {
     case 'campaign_bidding':
       if ((operation.strategy === 'TARGET_CPA' || operation.strategy === 'MAXIMIZE_CONVERSIONS') && operation.targetCpaMicros !== undefined && (!Number.isSafeInteger(operation.targetCpaMicros) || operation.targetCpaMicros < 1_000_000)) throw new Error('targetCpaMicros must be a safe integer of at least 1000000.');
       if ((operation.strategy === 'TARGET_ROAS' || operation.strategy === 'MAXIMIZE_CONVERSION_VALUE') && operation.targetRoas !== undefined && (operation.targetRoas < 0.01 || operation.targetRoas > 1000)) throw new Error('targetRoas must be between 0.01 and 1000.');
+      break;
+    case 'ad_group_create':
+      if (!operation.name.trim()) throw new Error('Ad group name cannot be empty.');
+      if (operation.name.trim().length > 255) throw new Error('Ad group name cannot exceed 255 characters.');
+      if (operation.cpcBidMicros !== undefined && (!Number.isSafeInteger(operation.cpcBidMicros) || operation.cpcBidMicros < 0 || operation.cpcBidMicros > 100_000_000_000)) throw new Error('cpcBidMicros must be a safe integer between 0 and 100000000000.');
       break;
     case 'ad_group_status': case 'ad_group_bid': assertId(operation.adGroupId, 'adGroupId'); break;
     case 'keyword_create': assertId(operation.adGroupId, 'adGroupId'); if (!operation.text.trim()) throw new Error('Keyword text cannot be empty.'); break;
@@ -80,8 +87,21 @@ async function conversionCustomerId(): Promise<string> {
 
 async function validateResourceReferences(campaignId: string, operations: OptimizationOperation[]): Promise<void> {
   const customer = getCustomer();
+  const createNames = new Set<string>();
+  const createOperations = operations.filter((operation): operation is Extract<OptimizationOperation, { type: 'ad_group_create' }> => operation.type === 'ad_group_create');
+  if (createOperations.length) {
+    const existingRows = await customer.query(`SELECT ad_group.name FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.status != 'REMOVED'`);
+    const existingNames = new Set(existingRows.map((row) => normalizeAdGroupName(String(row?.ad_group?.name ?? ''))));
+    for (const operation of createOperations) {
+      const normalizedName = normalizeAdGroupName(operation.name);
+      if (createNames.has(normalizedName)) throw new Error(`Ad group '${operation.name.trim()}' is duplicated in this optimization batch.`);
+      if (existingNames.has(normalizedName)) throw new Error(`Ad group '${operation.name.trim()}' already exists in campaign ${campaignId}.`);
+      createNames.add(normalizedName);
+    }
+  }
   for (const operation of operations) {
     switch (operation.type) {
+      case 'ad_group_create': break;
       case 'ad_group_status': case 'ad_group_bid': {
         const [row] = await customer.query(`SELECT ad_group.resource_name FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} LIMIT 1`);
         if (!row?.ad_group?.resource_name) throw new Error(`Ad group ${operation.adGroupId} does not belong to campaign ${campaignId}.`); break;
@@ -168,14 +188,12 @@ async function applyOperation(campaignId: string, operation: OptimizationOperati
     case 'campaign_status': return mutate({ entity: 'campaign', operation: 'update', resource: { resource_name: campaignResource, status: operation.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED } });
     case 'campaign_budget': { const [row] = await customer.query(`SELECT campaign_budget.resource_name FROM campaign WHERE campaign.id = ${campaignId} LIMIT 1`); if (!row?.campaign_budget?.resource_name) throw new Error('Campaign budget resource is unavailable.'); return mutate({ entity: 'campaign_budget', operation: 'update', resource: { resource_name: row.campaign_budget.resource_name, amount_micros: operation.dailyBudgetMicros } }); }
     case 'campaign_bidding': return mutate({ entity: 'campaign', operation: 'update', resource: { resource_name: campaignResource, ...campaignBiddingResource(operation) } });
+    case 'ad_group_create': return mutate({ entity: 'ad_group', operation: 'create', resource: { name: operation.name.trim(), campaign: campaignResource, type: enums.AdGroupType.SEARCH_STANDARD, status: operation.status === 'PAUSED' ? enums.AdGroupStatus.PAUSED : enums.AdGroupStatus.ENABLED, ...(operation.cpcBidMicros !== undefined ? { cpc_bid_micros: operation.cpcBidMicros } : {}) } });
     case 'ad_group_status': return mutate({ entity: 'ad_group', operation: 'update', resource: { resource_name: `customers/${customerId}/adGroups/${operation.adGroupId}`, status: operation.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED } });
     case 'ad_group_bid': return mutate({ entity: 'ad_group', operation: 'update', resource: { resource_name: `customers/${customerId}/adGroups/${operation.adGroupId}`, ...(operation.cpcBidMicros !== undefined ? { cpc_bid_micros: operation.cpcBidMicros } : {}), ...(operation.targetCpaMicros !== undefined ? { target_cpa_micros: operation.targetCpaMicros } : {}), ...(operation.targetRoas !== undefined ? { target_roas: operation.targetRoas } : {}) } });
     case 'keyword_status': return mutate({ entity: 'ad_group_criterion', operation: 'update', resource: { resource_name: await keywordResource(campaignId, operation.keywordId, operation.adGroupId), status: operation.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED } });
     case 'keyword_remove': return mutate({ entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: await keywordResource(campaignId, operation.keywordId, operation.adGroupId) } });
-    case 'keyword_create': {
-      const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD;
-      return mutate({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: false, keyword: { text: operation.text.trim(), match_type: matchType }, status: operation.status === 'PAUSED' ? enums.AdGroupCriterionStatus.PAUSED : enums.AdGroupCriterionStatus.ENABLED } });
-    }
+    case 'keyword_create': { const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD; return mutate({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: false, keyword: { text: operation.text.trim(), match_type: matchType }, status: operation.status === 'PAUSED' ? enums.AdGroupCriterionStatus.PAUSED : enums.AdGroupCriterionStatus.ENABLED } }); }
     case 'negative_keyword_add': { const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD; if (operation.adGroupId) return mutate({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.AdGroupCriterionStatus.ENABLED } }); return mutate({ entity: 'campaign_criterion', operation: 'create', resource: { campaign: campaignResource, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.CampaignCriterionStatus.ENABLED } }); }
     case 'negative_keyword_remove': return mutate({ entity: operation.adGroupId ? 'ad_group_criterion' : 'campaign_criterion', operation: 'remove', resource: { resource_name: operation.adGroupId ? `customers/${customerId}/adGroupCriteria/${operation.adGroupId}~${operation.criterionId}` : `customers/${customerId}/campaignCriteria/${campaignId}~${operation.criterionId}` } });
     case 'ad_status': return mutate({ entity: 'ad_group_ad', operation: 'update', resource: { resource_name: await adResource(campaignId, operation.adId), status: operation.status === 'ENABLED' ? enums.AdGroupAdStatus.ENABLED : enums.AdGroupAdStatus.PAUSED } });
