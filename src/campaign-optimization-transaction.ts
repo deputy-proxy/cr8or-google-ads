@@ -145,9 +145,9 @@ export async function applyCampaignOptimizationTransaction(input: CampaignOptimi
         case 'negative_keyword_add': {
           const matchType = operation.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : operation.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD;
           if (operation.adGroupId) {
-            mutations.push({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.AdGroupCriterionStatus.ENABLED });
+            mutations.push({ entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: `customers/${customerId}/adGroups/${operation.adGroupId}`, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.AdGroupCriterionStatus.ENABLED }});
           } else {
-            mutations.push({ entity: 'campaign_criterion', operation: 'create', resource: { campaign: campaign.resourceName, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.CampaignCriterionStatus.ENABLED });
+            mutations.push({ entity: 'campaign_criterion', operation: 'create', resource: { campaign: campaign.resourceName, negative: true, keyword: { text: operation.text.trim(), match_type: matchType }, status: enums.CampaignCriterionStatus.ENABLED }});
           }
           break;
         }
