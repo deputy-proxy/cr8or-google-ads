@@ -10,12 +10,12 @@ export type KeywordChange = { status: 'ENABLED' | 'PAUSED' };
 export type MutationTarget =
   | { type: 'campaign'; id: string; change: CampaignChange }
   | { type: 'ad_group'; id: string; change: AdGroupChange }
-  | { type: 'keyword'; id: string; change: KeywordChange };
+  | { type: 'keyword'; id: string; adGroupId?: string; change: KeywordChange };
 interface Snapshot {
   campaign?: { resource_name: string; id?: string | number; name?: string; status?: string };
   campaign_budget?: { resource_name: string; amount_micros?: string | number };
   ad_group?: { resource_name: string; id?: string | number; name?: string; status?: string };
-  ad_group_criterion?: { resource_name: string; criterion_id?: string | number; status?: string; keyword?: { text?: string } };
+  ad_group_criterion?: { resource_name: string; criterion_id?: string | number; status?: string; negative?: boolean; type?: string; keyword?: { text?: string } };
 }
 interface MutationPlan {
   version: 2;
@@ -59,8 +59,13 @@ async function loadTarget(target: MutationTarget): Promise<Snapshot> {
   let rows: Snapshot[];
   if (target.type === 'campaign') rows = await customer.query(`SELECT campaign.resource_name, campaign.id, campaign.name, campaign.status, campaign_budget.resource_name, campaign_budget.amount_micros FROM campaign WHERE campaign.id = ${target.id} LIMIT 1`) as Snapshot[];
   else if (target.type === 'ad_group') rows = await customer.query(`SELECT ad_group.resource_name, ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE ad_group.id = ${target.id} LIMIT 1`) as Snapshot[];
-  else rows = await customer.query(`SELECT ad_group_criterion.resource_name, ad_group_criterion.criterion_id, ad_group_criterion.status, ad_group_criterion.keyword.text FROM keyword_view WHERE ad_group_criterion.criterion_id = ${target.id} LIMIT 1`) as Snapshot[];
+  else {
+    const adGroupFilter = target.adGroupId ? ` AND ad_group.id = ${target.adGroupId}` : '';
+    rows = await customer.query(`SELECT ad_group.resource_name, ad_group.id, ad_group.name, ad_group_criterion.resource_name, ad_group_criterion.criterion_id, ad_group_criterion.status, ad_group_criterion.negative, ad_group_criterion.type, ad_group_criterion.keyword.text FROM ad_group_criterion WHERE ad_group_criterion.criterion_id = ${target.id} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED'${adGroupFilter} LIMIT 100`) as Snapshot[];
+    if (rows.length > 1) throw new Error(`Keyword ${target.id} is not globally unique. Provide adGroupId to identify the positive keyword criterion.`);
+  }
   if (!rows[0]) throw new Error(`${target.type} ${target.id} was not found or is not accessible.`);
+  if (target.type === 'keyword' && rows[0].ad_group_criterion?.negative === true) throw new Error(`Keyword ${target.id} resolves to a negative criterion and cannot be updated as a positive keyword.`);
   return rows[0];
 }
 function snapshotStatus(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.status : type === 'ad_group' ? snapshot.ad_group?.status : snapshot.ad_group_criterion?.status; }
