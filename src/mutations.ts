@@ -7,21 +7,27 @@ export type CampaignChange =
   | { dailyBudgetMicros: number; status?: never };
 export type AdGroupChange = { status: 'ENABLED' | 'PAUSED' };
 export type KeywordChange = { status: 'ENABLED' | 'PAUSED' };
+export type KeywordMove = { keywordId: string; sourceAdGroupId: string; destinationAdGroupId: string };
 export type MutationTarget =
   | { type: 'campaign'; id: string; change: CampaignChange }
   | { type: 'ad_group'; id: string; change: AdGroupChange }
-  | { type: 'keyword'; id: string; adGroupId?: string; change: KeywordChange };
+  | { type: 'keyword'; id: string; adGroupId?: string; change: KeywordChange }
+  | { type: 'keyword_move'; change: KeywordMove };
 interface Snapshot {
   campaign?: { resource_name: string; id?: string | number; name?: string; status?: string };
   campaign_budget?: { resource_name: string; amount_micros?: string | number };
   ad_group?: { resource_name: string; id?: string | number; name?: string; status?: string };
-  ad_group_criterion?: { resource_name: string; criterion_id?: string | number; status?: string; negative?: boolean; type?: string; keyword?: { text?: string } };
+  ad_group_criterion?: { resource_name: string; criterion_id?: string | number; status?: string; negative?: boolean; type?: string; keyword?: { text?: string; match_type?: string } };
+}
+interface KeywordMoveSnapshot {
+  source: { resourceName: string; adGroupId: string; adGroupName?: string; criterionId: string; text: string; matchType: 'EXACT' | 'PHRASE' | 'BROAD'; status: 'ENABLED' | 'PAUSED' };
+  destination: { resourceName: string; adGroupId: string; adGroupName?: string };
 }
 interface MutationPlan {
   version: 2;
   customerId: string;
   target: MutationTarget;
-  resourceName: string;
+  resourceName?: string;
   expectedStatus?: string;
   expectedBudgetMicros?: string;
   expiresAt: number;
@@ -29,19 +35,13 @@ interface MutationPlan {
 const PLAN_TTL_MS = 10 * 60 * 1000;
 const MIN_DAILY_BUDGET_MICROS = 1_000_000;
 const MAX_DAILY_BUDGET_MICROS = 100_000_000_000;
-type StatusChange = { status: 'ENABLED' | 'PAUSED' };
-function mutationSecret(): string {
-  const secret = process.env.MCP_AUTH_TOKEN;
-  if (!secret) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN');
-  return secret;
-}
+function mutationSecret(): string { const secret = process.env.MCP_AUTH_TOKEN; if (!secret) throw new Error('Missing required environment variable: MCP_AUTH_TOKEN'); return secret; }
 function sign(value: string): string { return createHmac('sha256', mutationSecret()).update(value).digest('base64url'); }
 function encodePlan(plan: MutationPlan): string { const payload = Buffer.from(JSON.stringify(plan)).toString('base64url'); return `${payload}.${sign(payload)}`; }
 function decodePlan(token: string): MutationPlan {
   const [payload, signature] = token.split('.');
   if (!payload || !signature) throw new Error('Invalid confirmation token.');
-  const expected = Buffer.from(sign(payload));
-  const actual = Buffer.from(signature);
+  const expected = Buffer.from(sign(payload)); const actual = Buffer.from(signature);
   if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new Error('Invalid confirmation token.');
   let plan: MutationPlan;
   try { plan = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as MutationPlan; } catch { throw new Error('Invalid confirmation token.'); }
@@ -54,6 +54,10 @@ function validateCampaignMutationChange(change: CampaignChange): void {
   if (!Number.isSafeInteger(change.dailyBudgetMicros)) throw new Error('dailyBudgetMicros must be a safe integer.');
   if (change.dailyBudgetMicros < MIN_DAILY_BUDGET_MICROS || change.dailyBudgetMicros > MAX_DAILY_BUDGET_MICROS) throw new Error(`dailyBudgetMicros must be between ${MIN_DAILY_BUDGET_MICROS} and ${MAX_DAILY_BUDGET_MICROS}.`);
 }
+function validateKeywordMove(change: KeywordMove): void {
+  for (const [name, value] of Object.entries(change)) if (!/^\d+$/.test(value)) throw new Error(`${name} must be a numeric Google Ads ID.`);
+  if (change.sourceAdGroupId === change.destinationAdGroupId) throw new Error('sourceAdGroupId and destinationAdGroupId must be different.');
+}
 async function loadTarget(target: MutationTarget): Promise<Snapshot> {
   const customer = getCustomer();
   let rows: Snapshot[];
@@ -61,50 +65,53 @@ async function loadTarget(target: MutationTarget): Promise<Snapshot> {
   else if (target.type === 'ad_group') rows = await customer.query(`SELECT ad_group.resource_name, ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE ad_group.id = ${target.id} LIMIT 1`) as Snapshot[];
   else {
     const adGroupFilter = target.adGroupId ? ` AND ad_group.id = ${target.adGroupId}` : '';
-    rows = await customer.query(`SELECT ad_group.resource_name, ad_group.id, ad_group.name, ad_group_criterion.resource_name, ad_group_criterion.criterion_id, ad_group_criterion.status, ad_group_criterion.negative, ad_group_criterion.type, ad_group_criterion.keyword.text FROM ad_group_criterion WHERE ad_group_criterion.criterion_id = ${target.id} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED'${adGroupFilter} LIMIT 100`) as Snapshot[];
+    rows = await customer.query(`SELECT ad_group.resource_name, ad_group.id, ad_group.name, ad_group_criterion.resource_name, ad_group_criterion.criterion_id, ad_group_criterion.status, ad_group_criterion.negative, ad_group_criterion.type, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type FROM ad_group_criterion WHERE ad_group_criterion.criterion_id = ${target.id} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED'${adGroupFilter} LIMIT 100`) as Snapshot[];
     if (rows.length > 1) throw new Error(`Keyword ${target.id} is not globally unique. Provide adGroupId to identify the positive keyword criterion.`);
   }
   if (!rows[0]) throw new Error(`${target.type} ${target.id} was not found or is not accessible.`);
   if (target.type === 'keyword' && rows[0].ad_group_criterion?.negative === true) throw new Error(`Keyword ${target.id} resolves to a negative criterion and cannot be updated as a positive keyword.`);
   return rows[0];
 }
-function snapshotStatus(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.status : type === 'ad_group' ? snapshot.ad_group?.status : snapshot.ad_group_criterion?.status; }
-function snapshotResource(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.resource_name : type === 'ad_group' ? snapshot.ad_group?.resource_name : snapshot.ad_group_criterion?.resource_name; }
-
+async function loadKeywordMove(): Promise<KeywordMoveSnapshot> {
+  const target = (currentTarget as { type: 'keyword_move'; change: KeywordMove });
+  const customer = getCustomer();
+  const [source] = await customer.query(`SELECT ad_group.id, ad_group.name, ad_group_criterion.resource_name, ad_group_criterion.criterion_id, ad_group_criterion.status, ad_group_criterion.negative, ad_group_criterion.type, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type FROM ad_group_criterion WHERE ad_group.id = ${target.change.sourceAdGroupId} AND ad_group_criterion.criterion_id = ${target.change.keywordId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' LIMIT 1`);
+  if (!source?.ad_group_criterion?.resource_name) throw new Error(`Positive keyword ${target.change.keywordId} was not found in source ad group ${target.change.sourceAdGroupId}.`);
+  const text = String(source.ad_group_criterion.keyword?.text ?? '').trim();
+  const matchType = String(source.ad_group_criterion.keyword?.match_type ?? '') as KeywordMoveSnapshot['source']['matchType'];
+  const status = String(source.ad_group_criterion.status ?? '') as KeywordMoveSnapshot['source']['status'];
+  if (!text || !['EXACT', 'PHRASE', 'BROAD'].includes(matchType) || !['ENABLED', 'PAUSED'].includes(status)) throw new Error(`Keyword ${target.change.keywordId} has incomplete data and cannot be moved safely.`);
+  const [destination] = await customer.query(`SELECT ad_group.resource_name, ad_group.id, ad_group.name FROM ad_group WHERE ad_group.id = ${target.change.destinationAdGroupId} AND ad_group.status != 'REMOVED' LIMIT 1`);
+  if (!destination?.ad_group?.resource_name) throw new Error(`Destination ad group ${target.change.destinationAdGroupId} was not found or is not accessible.`);
+  const escapedText = text.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+  const [existing] = await customer.query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE ad_group.id = ${target.change.destinationAdGroupId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.keyword.text = '${escapedText}' AND ad_group_criterion.keyword.match_type = ${matchType} LIMIT 1`);
+  if (existing?.ad_group_criterion?.resource_name) throw new Error(`Positive keyword '${text}' with match type ${matchType} already exists in destination ad group ${target.change.destinationAdGroupId}.`);
+  return { source: { resourceName: String(source.ad_group_criterion.resource_name), adGroupId: target.change.sourceAdGroupId, adGroupName: source.ad_group.name, criterionId: target.change.keywordId, text, matchType, status }, destination: { resourceName: String(destination.ad_group.resource_name), adGroupId: target.change.destinationAdGroupId, adGroupName: destination.ad_group.name } };
+}
+let currentTarget: MutationTarget;
 function serializeMutationError(error: unknown): Record<string, unknown> {
   if (error === null || typeof error !== 'object') return { message: String(error) };
-  const value = error as Record<string, unknown>;
-  const response = value.response && typeof value.response === 'object' ? value.response as Record<string, unknown> : undefined;
-  const failure = value.partial_failure_error && typeof value.partial_failure_error === 'object'
-    ? value.partial_failure_error as Record<string, unknown>
-    : undefined;
-  const errors = value.errors ?? value.error ?? response?.errors;
-  const serialized: Record<string, unknown> = {};
-  const copy = (key: string, source: Record<string, unknown> | undefined = value) => {
-    if (source?.[key] !== undefined) serialized[key] = source[key];
-  };
+  const value = error as Record<string, unknown>; const response = value.response && typeof value.response === 'object' ? value.response as Record<string, unknown> : undefined; const failure = value.partial_failure_error && typeof value.partial_failure_error === 'object' ? value.partial_failure_error as Record<string, unknown> : undefined; const errors = value.errors ?? value.error ?? response?.errors; const serialized: Record<string, unknown> = {};
+  const copy = (key: string, source: Record<string, unknown> | undefined = value) => { if (source?.[key] !== undefined) serialized[key] = source[key]; };
   for (const key of ['name', 'message', 'code', 'error_code', 'requestId', 'request_id', 'location', 'details', 'partialFailureError', 'partial_failure_error']) copy(key);
   if (errors !== undefined) serialized.errors = errors;
-  if (response) {
-    for (const key of ['requestId', 'request_id', 'message', 'errors', 'details']) copy(key, response);
-  }
+  if (response) for (const key of ['requestId', 'request_id', 'message', 'errors', 'details']) copy(key, response);
   if (failure) serialized.partialFailureError = failure;
   if (!serialized.message && failure?.message !== undefined) serialized.message = failure.message;
   if (!serialized.message && errors !== undefined) serialized.message = 'Google Ads mutation failed.';
-  if (!Object.keys(serialized).length) {
-    try { serialized.details = JSON.parse(JSON.stringify(error, Object.getOwnPropertyNames(error))); }
-    catch { serialized.details = Object.getOwnPropertyNames(error); }
-  }
+  if (!Object.keys(serialized).length) { try { serialized.details = JSON.parse(JSON.stringify(error, Object.getOwnPropertyNames(error))); } catch { serialized.details = Object.getOwnPropertyNames(error); } }
   return serialized;
 }
-
-function throwMutationError(error: unknown): never {
-  const serialized = serializeMutationError(error);
-  throw new Error(`Google Ads mutation failed: ${JSON.stringify(serialized)}`);
-}
+function throwMutationError(error: unknown): never { throw new Error(`Google Ads mutation failed: ${JSON.stringify(serializeMutationError(error))}`); }
 
 export async function validateMutation(target: MutationTarget) {
-  if ('status' in target.change) validateStatus((target.change as StatusChange).status); else validateCampaignMutationChange(target.change);
+  if (target.type === 'keyword_move') {
+    validateKeywordMove(target.change);
+    currentTarget = target;
+    const snapshot = await loadKeywordMove();
+    return { type: target.type, source: snapshot.source, destination: snapshot.destination, valid: true as const };
+  }
+  if ('status' in target.change) validateStatus((target.change as { status: 'ENABLED' | 'PAUSED' }).status); else validateCampaignMutationChange(target.change as CampaignChange);
   const current = await loadTarget(target);
   const status = snapshotStatus(current, target.type);
   const resourceName = snapshotResource(current, target.type);
@@ -113,42 +120,41 @@ export async function validateMutation(target: MutationTarget) {
   if ('dailyBudgetMicros' in target.change && target.change.dailyBudgetMicros === Number(current.campaign_budget?.amount_micros ?? 0)) throw new Error('Campaign budget is already set to that amount.');
   return { type: target.type, id: target.id, resourceName, current: { status, dailyBudgetMicros: Number(current.campaign_budget?.amount_micros ?? 0), name: current.campaign?.name ?? current.ad_group?.name, keywordText: current.ad_group_criterion?.keyword?.text }, requested: target.change, valid: true as const };
 }
+function snapshotStatus(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.status : type === 'ad_group' ? snapshot.ad_group?.status : snapshot.ad_group_criterion?.status; }
+function snapshotResource(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.resource_name : type === 'ad_group' ? snapshot.ad_group?.resource_name : snapshot.ad_group_criterion?.resource_name; }
 export async function previewMutation(target: MutationTarget) {
-  const validation = await validateMutation(target);
-  const current = await loadTarget(target);
-  const expiresAt = Date.now() + PLAN_TTL_MS;
-  const plan: MutationPlan = { version: 2, customerId: getCustomer().credentials.customer_id, target, resourceName: validation.resourceName, expectedStatus: snapshotStatus(current, target.type), expectedBudgetMicros: String(current.campaign_budget?.amount_micros ?? 0), expiresAt };
+  const validation = await validateMutation(target); const expiresAt = Date.now() + PLAN_TTL_MS;
+  const plan: MutationPlan = target.type === 'keyword_move' ? { version: 2, customerId: getCustomer().credentials.customer_id, target, expiresAt } : { version: 2, customerId: getCustomer().credentials.customer_id, target, resourceName: validation.resourceName, expectedStatus: validation.current.status, expectedBudgetMicros: String(validation.current.dailyBudgetMicros), expiresAt };
   return { ...validation, expiresAt: new Date(expiresAt).toISOString(), confirmationToken: encodePlan(plan) };
 }
 export async function applyMutation(confirmationToken: string) {
   const plan = decodePlan(confirmationToken);
+  if (plan.target.type === 'keyword_move') {
+    currentTarget = plan.target;
+    const snapshot = await loadKeywordMove();
+    const customer = getCustomer();
+    try {
+      const matchType = snapshot.source.matchType === 'EXACT' ? enums.KeywordMatchType.EXACT : snapshot.source.matchType === 'PHRASE' ? enums.KeywordMatchType.PHRASE : enums.KeywordMatchType.BROAD;
+      const status = snapshot.source.status === 'PAUSED' ? enums.AdGroupCriterionStatus.PAUSED : enums.AdGroupCriterionStatus.ENABLED;
+      const result = await customer.mutateResources([
+        { entity: 'ad_group_criterion', operation: 'create', resource: { ad_group: snapshot.destination.resourceName, negative: false, keyword: { text: snapshot.source.text, match_type: matchType }, status } },
+        { entity: 'ad_group_criterion', operation: 'remove', resource: { resource_name: snapshot.source.resourceName } },
+      ] as never[], { partial_failure: false });
+      return { applied: true, atomic: true, target: plan.target, source: snapshot.source, destination: snapshot.destination, result };
+    } catch (error) { throwMutationError(error); }
+  }
   const current = await loadTarget(plan.target);
   if (snapshotResource(current, plan.target.type) !== plan.resourceName || snapshotStatus(current, plan.target.type) !== plan.expectedStatus) throw new Error('Resource state changed since the preview. Generate a new preview.');
   if (plan.target.type === 'campaign' && 'dailyBudgetMicros' in plan.target.change && String(current.campaign_budget?.amount_micros ?? 0) !== String(plan.expectedBudgetMicros ?? 0)) throw new Error('Campaign budget changed since the preview. Generate a new preview.');
   const customer = getCustomer();
   try {
     if (plan.target.type === 'campaign') {
-      if ('status' in plan.target.change) {
-        const status = plan.target.change.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED;
-        const result = await customer.campaigns.update([{ resource_name: plan.resourceName, status }]);
-        return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
-      }
-      const budgetResourceName = current.campaign_budget?.resource_name;
-      if (!budgetResourceName) throw new Error('Campaign budget resource is unavailable. Generate a new preview.');
-      const result = await customer.campaignBudgets.update([{ resource_name: budgetResourceName, amount_micros: plan.target.change.dailyBudgetMicros }]);
-      return { applied: true, target: plan.target, resourceName: budgetResourceName, result };
+      if ('status' in plan.target.change) { const status = plan.target.change.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED; const result = await customer.campaigns.update([{ resource_name: plan.resourceName, status }]); return { applied: true, target: plan.target, resourceName: plan.resourceName, result }; }
+      const budgetResourceName = current.campaign_budget?.resource_name; if (!budgetResourceName) throw new Error('Campaign budget resource is unavailable. Generate a new preview.'); const result = await customer.campaignBudgets.update([{ resource_name: budgetResourceName, amount_micros: plan.target.change.dailyBudgetMicros }]); return { applied: true, target: plan.target, resourceName: budgetResourceName, result };
     }
-    if (plan.target.type === 'ad_group') {
-      const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED;
-      const result = await customer.adGroups.update([{ resource_name: plan.resourceName, status }]);
-      return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
-    }
-    const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED;
-    const result = await customer.adGroupCriteria.update([{ resource_name: plan.resourceName, status }]);
-    return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
-  } catch (error) {
-    throwMutationError(error);
-  }
+    if (plan.target.type === 'ad_group') { const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED; const result = await customer.adGroups.update([{ resource_name: plan.resourceName, status }]); return { applied: true, target: plan.target, resourceName: plan.resourceName, result }; }
+    const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED; const result = await customer.adGroupCriteria.update([{ resource_name: plan.resourceName, status }]); return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
+  } catch (error) { throwMutationError(error); }
 }
 export async function validateCampaignChange(campaignId: string, change: CampaignChange) { return validateMutation({ type: 'campaign', id: campaignId, change }); }
 export async function previewCampaignChange(campaignId: string, change: CampaignChange) { return previewMutation({ type: 'campaign', id: campaignId, change }); }
