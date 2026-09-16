@@ -3,6 +3,7 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { registerReadTools } from './tools.js';
 import { registerMutationTools } from './mutation-tools.js';
+import { registerPhaseCTools } from './phase-c.js';
 import { registerAuditTools } from './audit-tools.js';
 import { handleOAuthAuthorize, handleOAuthCallback, handleOAuthToken, oauthMetadata, protectedResourceMetadata, verifyOAuthAccessToken } from './oauth.js';
 
@@ -16,6 +17,7 @@ function createMcpServer(): McpServer {
   const server = new McpServer({ name: 'cr8or-google-ads', version: '0.1.0' });
   registerReadTools(server);
   registerMutationTools(server);
+  registerPhaseCTools(server);
   registerAuditTools(server);
   return server;
 }
@@ -110,7 +112,7 @@ const httpServer = createServer(async (req, res) => {
   if (!(await isAuthorized(req))) {
     res.writeHead(401, {
       'content-type': 'application/json',
-      'www-authenticate': `Bearer resource_metadata="${issuer}/.well-known/oauth-protected-resource", scope="mcp"`,
+      'www-authenticate': `Bearer resource_metadata=\"${issuer}/.well-known/oauth-protected-resource\", scope=\"mcp\"`,
       'access-control-allow-origin': '*',
     });
     res.end(JSON.stringify({ error: 'Unauthorized' }));
