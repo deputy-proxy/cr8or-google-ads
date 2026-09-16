@@ -4,6 +4,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { registerReadTools } from './tools.js';
 import { registerMutationTools } from './mutation-tools.js';
 import { registerPhaseCTools } from './phase-c.js';
+import { registerPhaseDTools } from './phase-d.js';
 import { registerAuditTools } from './audit-tools.js';
 import { handleOAuthAuthorize, handleOAuthCallback, handleOAuthToken, oauthMetadata, protectedResourceMetadata, verifyOAuthAccessToken } from './oauth.js';
 
@@ -18,6 +19,7 @@ function createMcpServer(): McpServer {
   registerReadTools(server);
   registerMutationTools(server);
   registerPhaseCTools(server);
+  registerPhaseDTools(server);
   registerAuditTools(server);
   return server;
 }
