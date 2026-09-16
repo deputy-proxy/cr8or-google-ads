@@ -65,6 +65,39 @@ async function loadTarget(target: MutationTarget): Promise<Snapshot> {
 }
 function snapshotStatus(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.status : type === 'ad_group' ? snapshot.ad_group?.status : snapshot.ad_group_criterion?.status; }
 function snapshotResource(snapshot: Snapshot, type: MutationTarget['type']): string | undefined { return type === 'campaign' ? snapshot.campaign?.resource_name : type === 'ad_group' ? snapshot.ad_group?.resource_name : snapshot.ad_group_criterion?.resource_name; }
+
+function serializeMutationError(error: unknown): Record<string, unknown> {
+  if (error === null || typeof error !== 'object') return { message: String(error) };
+  const value = error as Record<string, unknown>;
+  const response = value.response && typeof value.response === 'object' ? value.response as Record<string, unknown> : undefined;
+  const failure = value.partial_failure_error && typeof value.partial_failure_error === 'object'
+    ? value.partial_failure_error as Record<string, unknown>
+    : undefined;
+  const errors = value.errors ?? value.error ?? response?.errors;
+  const serialized: Record<string, unknown> = {};
+  const copy = (key: string, source: Record<string, unknown> | undefined = value) => {
+    if (source?.[key] !== undefined) serialized[key] = source[key];
+  };
+  for (const key of ['name', 'message', 'code', 'error_code', 'requestId', 'request_id', 'location', 'details', 'partialFailureError', 'partial_failure_error']) copy(key);
+  if (errors !== undefined) serialized.errors = errors;
+  if (response) {
+    for (const key of ['requestId', 'request_id', 'message', 'errors', 'details']) copy(key, response);
+  }
+  if (failure) serialized.partialFailureError = failure;
+  if (!serialized.message && failure?.message !== undefined) serialized.message = failure.message;
+  if (!serialized.message && errors !== undefined) serialized.message = 'Google Ads mutation failed.';
+  if (!Object.keys(serialized).length) {
+    try { serialized.details = JSON.parse(JSON.stringify(error, Object.getOwnPropertyNames(error))); }
+    catch { serialized.details = Object.getOwnPropertyNames(error); }
+  }
+  return serialized;
+}
+
+function throwMutationError(error: unknown): never {
+  const serialized = serializeMutationError(error);
+  throw new Error(`Google Ads mutation failed: ${JSON.stringify(serialized)}`);
+}
+
 export async function validateMutation(target: MutationTarget) {
   if ('status' in target.change) validateStatus((target.change as StatusChange).status); else validateCampaignMutationChange(target.change);
   const current = await loadTarget(target);
@@ -88,25 +121,29 @@ export async function applyMutation(confirmationToken: string) {
   if (snapshotResource(current, plan.target.type) !== plan.resourceName || snapshotStatus(current, plan.target.type) !== plan.expectedStatus) throw new Error('Resource state changed since the preview. Generate a new preview.');
   if (plan.target.type === 'campaign' && 'dailyBudgetMicros' in plan.target.change && String(current.campaign_budget?.amount_micros ?? 0) !== String(plan.expectedBudgetMicros ?? 0)) throw new Error('Campaign budget changed since the preview. Generate a new preview.');
   const customer = getCustomer();
-  if (plan.target.type === 'campaign') {
-    if ('status' in plan.target.change) {
-      const status = plan.target.change.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED;
-      const result = await customer.campaigns.update([{ resource_name: plan.resourceName, status }]);
+  try {
+    if (plan.target.type === 'campaign') {
+      if ('status' in plan.target.change) {
+        const status = plan.target.change.status === 'ENABLED' ? enums.CampaignStatus.ENABLED : enums.CampaignStatus.PAUSED;
+        const result = await customer.campaigns.update([{ resource_name: plan.resourceName, status }]);
+        return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
+      }
+      const budgetResourceName = current.campaign_budget?.resource_name;
+      if (!budgetResourceName) throw new Error('Campaign budget resource is unavailable. Generate a new preview.');
+      const result = await customer.campaignBudgets.update([{ resource_name: budgetResourceName, amount_micros: plan.target.change.dailyBudgetMicros }]);
+      return { applied: true, target: plan.target, resourceName: budgetResourceName, result };
+    }
+    if (plan.target.type === 'ad_group') {
+      const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED;
+      const result = await customer.adGroups.update([{ resource_name: plan.resourceName, status }]);
       return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
     }
-    const budgetResourceName = current.campaign_budget?.resource_name;
-    if (!budgetResourceName) throw new Error('Campaign budget resource is unavailable. Generate a new preview.');
-    const result = await customer.campaignBudgets.update([{ resource_name: budgetResourceName, amount_micros: plan.target.change.dailyBudgetMicros }]);
-    return { applied: true, target: plan.target, resourceName: budgetResourceName, result };
-  }
-  if (plan.target.type === 'ad_group') {
-    const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupStatus.ENABLED : enums.AdGroupStatus.PAUSED;
-    const result = await customer.adGroups.update([{ resource_name: plan.resourceName, status }]);
+    const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED;
+    const result = await customer.adGroupCriteria.update([{ resource_name: plan.resourceName, status }]);
     return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
+  } catch (error) {
+    throwMutationError(error);
   }
-  const status = plan.target.change.status === 'ENABLED' ? enums.AdGroupCriterionStatus.ENABLED : enums.AdGroupCriterionStatus.PAUSED;
-  const result = await customer.adGroupCriteria.update([{ resource_name: plan.resourceName, status }]);
-  return { applied: true, target: plan.target, resourceName: plan.resourceName, result };
 }
 export async function validateCampaignChange(campaignId: string, change: CampaignChange) { return validateMutation({ type: 'campaign', id: campaignId, change }); }
 export async function previewCampaignChange(campaignId: string, change: CampaignChange) { return previewMutation({ type: 'campaign', id: campaignId, change }); }
