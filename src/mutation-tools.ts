@@ -41,8 +41,12 @@ const optimizationOperation = z.discriminatedUnion('type', [
 ]);
 
 const optimizationInput = z.object({
-  campaignId: z.string().regex(/^\d+$/),
+  campaignName: z.string().min(1).optional(),
+  campaignId: z.string().regex(/^\d+$/).optional(),
   operations: z.array(optimizationOperation).min(1).max(100),
+}).refine((value) => Boolean(value.campaignName) !== Boolean(value.campaignId), {
+  message: 'Provide exactly one of campaignName or campaignId.',
+  path: ['campaignName'],
 });
 
 function json(data: unknown): string {
@@ -100,15 +104,17 @@ export function registerMutationTools(server: McpServer): void {
 
   server.registerTool('validate_campaign_optimization', {
     title: 'Validate campaign optimization',
-    description: 'Validate a batch of campaign optimization changes without modifying Google Ads. Supports campaign budget and bidding, ad groups, keywords, negative keywords, ads, and conversion goals.',
+    description: 'Validate a batch of campaign optimization changes without modifying Google Ads. Prefer exact campaignName so the server resolves the live campaign resource itself. campaignId remains supported for compatibility.',
     inputSchema: optimizationInput,
-  }, async (input) => ({
-    content: [{ type: 'text', text: json(await validateCampaignOptimization(input)) }],
-  }));
+  }, async ({ campaignName, campaignId, operations }) => {
+    const resolved = campaignName || campaignId;
+    const input = { campaignId: resolved as string, operations };
+    return { content: [{ type: 'text', text: json(await validateCampaignOptimization(input)) }] };
+  });
 
   server.registerTool('preview_campaign_optimization', {
     title: 'Preview campaign optimization',
-    description: 'Validate a batch of campaign optimization changes and return an opaque short-lived confirmation token. No Google Ads changes are made.',
+    description: 'Resolve the live campaign, validate the complete batch, and return an opaque short-lived confirmation token. No Google Ads changes are made.',
     inputSchema: optimizationInput,
   }, async (input) => ({
     content: [{ type: 'text', text: json(await previewCampaignOptimizationForMcp(input)) }],
@@ -116,7 +122,7 @@ export function registerMutationTools(server: McpServer): void {
 
   server.registerTool('apply_campaign_optimization', {
     title: 'Apply confirmed campaign optimization',
-    description: 'Apply a previously previewed batch of campaign optimization changes using its opaque confirmation token. The operation refuses to proceed if the campaign state changed after preview.',
+    description: 'Apply a previously previewed campaign optimization as one grouped Google Ads transaction. The server re-resolves and revalidates the campaign immediately before mutation.',
     inputSchema: z.object({ confirmationToken: z.string().min(20) }),
   }, async ({ confirmationToken }) => {
     try {
