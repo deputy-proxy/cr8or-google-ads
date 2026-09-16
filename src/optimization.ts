@@ -53,7 +53,8 @@ function validateOperation(operation: OptimizationOperation): void {
       if ((operation.strategy === 'TARGET_CPA' || operation.strategy === 'MAXIMIZE_CONVERSIONS') && operation.targetCpaMicros !== undefined && (!Number.isSafeInteger(operation.targetCpaMicros) || operation.targetCpaMicros < 1_000_000)) throw new Error('targetCpaMicros must be a safe integer of at least 1000000.');
       if ((operation.strategy === 'TARGET_ROAS' || operation.strategy === 'MAXIMIZE_CONVERSION_VALUE') && operation.targetRoas !== undefined && (operation.targetRoas < 0.01 || operation.targetRoas > 1000)) throw new Error('targetRoas must be between 0.01 and 1000.');
       break;
-    case 'ad_group_status': case 'ad_group_bid': case 'keyword_create': assertId(operation.adGroupId, 'adGroupId'); break;
+    case 'ad_group_status': case 'ad_group_bid': assertId(operation.adGroupId, 'adGroupId'); break;
+    case 'keyword_create': assertId(operation.adGroupId, 'adGroupId'); if (!operation.text.trim()) throw new Error('Keyword text cannot be empty.'); break;
     case 'keyword_status': case 'keyword_remove': assertId(operation.keywordId, 'keywordId'); assertId(operation.adGroupId, 'adGroupId'); break;
     case 'negative_keyword_remove': assertId(operation.criterionId, 'criterionId'); if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId'); break;
     case 'negative_keyword_add': if (operation.adGroupId) assertId(operation.adGroupId, 'adGroupId'); if (!operation.text.trim()) throw new Error('Negative keyword text cannot be empty.'); break;
@@ -62,7 +63,6 @@ function validateOperation(operation: OptimizationOperation): void {
     case 'custom_conversion_goal': if (!operation.name.trim()) throw new Error('Custom conversion goal name cannot be empty.'); if (!operation.conversionActionIds.length) throw new Error('At least one conversion action is required.'); operation.conversionActionIds.forEach((id) => assertId(id, 'conversionActionId')); break;
     default: break;
   }
-  if (('keyword_create' in operation) && !operation.text.trim()) throw new Error('Keyword text cannot be empty.');
 }
 
 async function loadCampaign(campaignId: string) {
@@ -90,9 +90,8 @@ async function validateResourceReferences(campaignId: string, operations: Optimi
         const [adGroup] = await customer.query(`SELECT ad_group.resource_name FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group.status != 'REMOVED' LIMIT 1`);
         if (!adGroup?.ad_group?.resource_name) throw new Error(`Ad group ${operation.adGroupId} does not belong to campaign ${campaignId}.`);
         const escapedText = operation.text.trim().replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        const matchType = operation.matchType;
-        const [existing] = await customer.query(`SELECT ad_group_criterion.resource_name, ad_group_criterion.status FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.keyword.text = '${escapedText}' AND ad_group_criterion.keyword.match_type = ${matchType} LIMIT 1`);
-        if (existing?.ad_group_criterion?.resource_name) throw new Error(`Positive keyword '${operation.text.trim()}' with match type ${matchType} already exists in ad group ${operation.adGroupId}.`);
+        const [existing] = await customer.query(`SELECT ad_group_criterion.resource_name FROM ad_group_criterion WHERE campaign.id = ${campaignId} AND ad_group.id = ${operation.adGroupId} AND ad_group_criterion.type = KEYWORD AND ad_group_criterion.negative = FALSE AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.keyword.text = '${escapedText}' AND ad_group_criterion.keyword.match_type = ${operation.matchType} LIMIT 1`);
+        if (existing?.ad_group_criterion?.resource_name) throw new Error(`Positive keyword '${operation.text.trim()}' with match type ${operation.matchType} already exists in ad group ${operation.adGroupId}.`);
         break;
       }
       case 'keyword_status': case 'keyword_remove': {
