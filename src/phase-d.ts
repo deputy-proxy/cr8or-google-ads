@@ -110,10 +110,7 @@ async function resolve(campaignId: string, groups: Group[]) {
   if (!campaignRow?.campaign?.resource_name || !campaignRow.campaign) throw new Error(`Campaign ${campaignId} was not found or is not accessible.`);
 
   const existing = await customer.query(`SELECT ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE campaign.id = ${campaignId} AND ad_group.status != 'REMOVED'`);
-  const existingNames = new Set(existing.map((rawRow) => {
-    const row = rawRow as AdGroupRow;
-    return normalizeName(String(row.ad_group?.name ?? ''));
-  }));
+  const existingNames = new Set(existing.map((row) => normalizeName(String(row?.ad_group?.name ?? ''))));
   const loadedGroups: LoadedGroup[] = [];
 
   for (const group of groups) {
@@ -171,11 +168,10 @@ export async function previewCampaignRestructure(input: { campaignId: string; gr
     campaignId: input.campaignId,
     groups: resolved.groups,
     expectedCampaignStatus: String(resolved.campaign.status),
-    expectedGroups: resolved.existing.map((rawRow) => {
+    expectedGroups: resolved.existing.flatMap((rawRow) => {
       const row = rawRow as AdGroupRow;
-      if (!row.ad_group) return null;
-      return { id: String(row.ad_group.id), name: String(row.ad_group.name), status: String(row.ad_group.status) };
-    }).filter((group): group is { id: string; name: string; status: string } => group !== null),
+      return row.ad_group ? [{ id: String(row.ad_group.id), name: String(row.ad_group.name), status: String(row.ad_group.status) }] : [];
+    }),
     expiresAt,
   };
 
@@ -194,6 +190,8 @@ export async function previewCampaignRestructure(input: { campaignId: string; gr
 
 export async function applyCampaignRestructure(token: string) {
   const plan = decode(token);
+  if (plan.kind !== 'campaign_restructure') throw new Error('Confirmation token is not for a campaign restructure.');
+
   const inputGroups: Group[] = plan.groups.map((group) => ({
     name: group.name,
     status: group.status,
@@ -204,12 +202,13 @@ export async function applyCampaignRestructure(token: string) {
   const resolved = await resolve(plan.campaignId, inputGroups);
   if (String(resolved.campaign.status) !== plan.expectedCampaignStatus) throw new Error('Campaign status changed since preview. Generate a new preview.');
 
+  const currentGroups = resolved.existing.flatMap((rawRow) => {
+    const row = rawRow as AdGroupRow;
+    return row.ad_group ? [{ id: String(row.ad_group.id), name: String(row.ad_group.name), status: String(row.ad_group.status) }] : [];
+  });
   if (
-    resolved.existing.length !== plan.expectedGroups.length ||
-    resolved.existing.some((rawRow) => {
-      const row = rawRow as AdGroupRow;
-      return !row.ad_group || !plan.expectedGroups.some((expected) => expected.id === String(row.ad_group?.id) && expected.name === String(row.ad_group?.name) && expected.status === String(row.ad_group?.status));
-    })
+    currentGroups.length !== plan.expectedGroups.length ||
+    currentGroups.some((current) => !plan.expectedGroups.some((expected) => expected.id === current.id && expected.name === current.name && expected.status === current.status))
   ) {
     throw new Error('Campaign ad-group structure changed since preview. Generate a new preview.');
   }
