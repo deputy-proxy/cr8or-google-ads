@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod/v4';
+import { resolveCampaignById, resolveCampaignByName } from './campaign-resolution.js';
 import { applyCampaignOptimizationForMcp, previewCampaignOptimizationForMcp } from './optimization-confirmation.js';
 import { validateCampaignOptimization } from './optimization.js';
 import { applyMutation, previewMutation, validateMutation } from './mutations.js';
@@ -51,6 +52,12 @@ const optimizationInput = z.object({
 
 function json(data: unknown): string {
   return JSON.stringify(data, (_, value) => typeof value === 'bigint' ? value.toString() : value, 2);
+}
+
+async function resolveOptimizationCampaign(campaignName?: string, campaignId?: string) {
+  if (campaignName && campaignId) throw new Error('Provide campaignName or campaignId, not both.');
+  if (!campaignName && !campaignId) throw new Error('Provide campaignName or campaignId.');
+  return campaignName ? resolveCampaignByName(campaignName) : resolveCampaignById(campaignId as string);
 }
 
 export function registerMutationTools(server: McpServer): void {
@@ -107,9 +114,8 @@ export function registerMutationTools(server: McpServer): void {
     description: 'Validate a batch of campaign optimization changes without modifying Google Ads. Prefer exact campaignName so the server resolves the live campaign resource itself. campaignId remains supported for compatibility.',
     inputSchema: optimizationInput,
   }, async ({ campaignName, campaignId, operations }) => {
-    const resolved = campaignName || campaignId;
-    const input = { campaignId: resolved as string, operations };
-    return { content: [{ type: 'text', text: json(await validateCampaignOptimization(input)) }] };
+    const campaign = await resolveOptimizationCampaign(campaignName, campaignId);
+    return { content: [{ type: 'text', text: json(await validateCampaignOptimization({ campaignId: campaign.id, operations })) }] };
   });
 
   server.registerTool('preview_campaign_optimization', {
